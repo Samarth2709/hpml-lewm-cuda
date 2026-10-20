@@ -1,0 +1,14 @@
+# Downloaded checkpoint, upstream sources and simulator wheel
+.cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+# Local environments and tool caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+.env
+.env.*

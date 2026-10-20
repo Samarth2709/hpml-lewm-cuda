@@ -1,0 +1,557 @@
+{
+  "about": "Model configuration and data provenance. Each entry under \"files\" holds the content of one original file from the team repository (revision 5de368b). json.dumps(content, indent=json_indent) plus an optional newline reproduces the original bytes; test_project.py checks the SHA-256.",
+  "files": {
+    "model": {
+      "original_path": "lewm/assets/config.json",
+      "sha256": "2564086e961e7b5c7c04dffc451091115b389a590645ff19653c64fd0bc16e09",
+      "json_indent": 4,
+      "trailing_newline": true,
+      "content": {
+        "_target_": "stable_worldmodel.wm.lewm.LeWM",
+        "encoder": {
+          "_target_": "stable_pretraining.backbone.utils.vit_hf",
+          "size": "tiny",
+          "patch_size": 14,
+          "image_size": 224,
+          "pretrained": false,
+          "use_mask_token": false
+        },
+        "predictor": {
+          "_target_": "stable_worldmodel.wm.lewm.module.Predictor",
+          "num_frames": 3,
+          "input_dim": 192,
+          "hidden_dim": 192,
+          "output_dim": 192,
+          "depth": 6,
+          "heads": 16,
+          "mlp_dim": 2048,
+          "dim_head": 64,
+          "dropout": 0.1,
+          "emb_dropout": 0.0
+        },
+        "action_encoder": {
+          "_target_": "stable_worldmodel.wm.lewm.module.Embedder",
+          "input_dim": 10,
+          "emb_dim": 192
+        },
+        "projector": {
+          "_target_": "stable_worldmodel.wm.lewm.module.MLP",
+          "input_dim": 192,
+          "output_dim": 192,
+          "hidden_dim": 2048,
+          "norm_fn": {
+            "_target_": "torch.nn.BatchNorm1d",
+            "_partial_": true
+          }
+        },
+        "pred_proj": {
+          "_target_": "stable_worldmodel.wm.lewm.module.MLP",
+          "input_dim": 192,
+          "output_dim": 192,
+          "hidden_dim": 2048,
+          "norm_fn": {
+            "_target_": "torch.nn.BatchNorm1d",
+            "_partial_": true
+          }
+        }
+      }
+    },
+    "vision_encoder": {
+      "original_path": "lewm/assets/vision_config_provenance.json",
+      "sha256": "170af1a770ca046cadda1e3e136b94bfdd214d82fa38bdfdc23828131cfb265e",
+      "json_indent": 2,
+      "trailing_newline": true,
+      "content": {
+        "checkpoint_sha256": "7d2af06261610f0407283c5e812f2806d880448e2f680ede6ec62473393c0eca",
+        "export_sha256": "fdd1a79938ed1b0e325b23e5b7016b1a64b7e9f5a5627a05d2a6561335392842",
+        "config": {
+          "hidden_size": 192,
+          "num_hidden_layers": 12,
+          "num_attention_heads": 3,
+          "intermediate_size": 768,
+          "hidden_act": "gelu",
+          "hidden_dropout_prob": 0.0,
+          "attention_probs_dropout_prob": 0.0,
+          "layer_norm_eps": 1e-12,
+          "image_size": 224,
+          "patch_size": 14,
+          "num_channels": 3,
+          "qkv_bias": true,
+          "chunk_size_feed_forward": 0,
+          "_attn_implementation_internal": "sdpa"
+        },
+        "tensors": 207,
+        "tensor_bytes": 25192968,
+        "extraction": "Inert metadata interpretation and raw ZIP storages; no checkpoint-defined class execution."
+      }
+    },
+    "action_normalization": {
+      "original_path": "lewm/assets/normalization.json",
+      "sha256": "203a1c0f342309896c96167a8df64159d5629c803022fd245baa0b6134c85795",
+      "json_indent": 2,
+      "trailing_newline": false,
+      "content": {
+        "source_url": "https://drive.usercontent.google.com/download?id=1JwsNso_ZWBh2FyVKObR4Km2XmjCN1-HM&export=download&confirm=t",
+        "source_size_bytes": 46300921856,
+        "source_dataset": "action",
+        "source_shape": [
+          2336736,
+          2
+        ],
+        "source_dtype": "float32",
+        "full_column_c_order_sha256": "db62c4b5317b53e1e256140146b512419a79f27f805f411637a18be8bcc18011",
+        "input_rows": 2336736,
+        "fit_rows": 2336736,
+        "nan_rows_removed": 0,
+        "infinite_rows_removed": 0,
+        "nonfinite_rows_removed": 0,
+        "mean": [
+          -0.007812564379916172,
+          0.006860687229453032
+        ],
+        "var": [
+          0.043458674726340484,
+          0.04274499450737964
+        ],
+        "scale": [
+          0.20846744284501714,
+          0.20674862637362224
+        ],
+        "ddof": 0,
+        "accumulator_dtype": "float64",
+        "algorithm": "corrected two-pass unweighted population moments; StandardScaler-compatible algebra",
+        "sklearn_runtime_bit_parity_verified": false,
+        "scope": "full original HDF5 action column, not sample-fitted"
+      }
+    },
+    "cohort_selection_rule": {
+      "original_path": "lewm/assets/cohort/selection_rule.json",
+      "sha256": "117ea22893226437fd91b2d149c636e953b11ab5f7537b490764e919c703d111",
+      "json_indent": 2,
+      "trailing_newline": true,
+      "content": {
+        "action_steps": 25,
+        "candidate_order": "Same as round37: start at floor((stratum_start+stratum_stop-1)/2), then ascending to stop, then ascending from start to midpoint-1. Take the first 4 eligible candidates of each stratum.",
+        "cap_rule": "Stop with an error when the next request would pass the cap. Before the pixel download, stop if the planned pixel chunk bytes do not fit in the remaining cap.",
+        "controller_outcomes_used": false,
+        "development_rule_source": "experiments/frontier_2026_09_26/round37/data_sources/selection_rule.json",
+        "development_rule_source_sha256": "d7f66771d22e0c909c68cf092075d940234dfd9421387f87ff70bb7c76dfdfd8",
+        "development_selection_source": "experiments/frontier_2026_09_26/round37/data_sources/selection_manifest.json",
+        "development_selection_source_sha256": "7e9252cee5ec6504c39a4aa57910c2d6849d19faa0f25bb529e364371158e3ca",
+        "duplicate_geometry": "Same as round37: all first four state positions differ by at most 1 pixel AND the wrapped block-angle difference is at most 0.01 rad. Velocities do not distinguish geometry.",
+        "eligibility": "Episode length >= 26; finite seven-coordinate initial state; ID not a tuning ID and not a development ID; initial geometry distinct from the 4 tuning starts, the 24 development starts and every earlier fresh pick.",
+        "episodes_per_stratum": 4,
+        "excluded_development_episode_ids": [
+          388,
+          1167,
+          1945,
+          2724,
+          3502,
+          4281,
+          5059,
+          5838,
+          6616,
+          7395,
+          8173,
+          8952,
+          9731,
+          10509,
+          11288,
+          12066,
+          12845,
+          13623,
+          14402,
+          15180,
+          15959,
+          16737,
+          17516,
+          18295
+        ],
+        "excluded_tuning_episode_ids": [
+          0,
+          1000,
+          5000,
+          10000
+        ],
+        "frame_steps": [
+          0,
+          24,
+          25
+        ],
+        "geometry_angle_tolerance_rad": 0.01,
+        "geometry_position_max_abs_tolerance": 1.0,
+        "holdout_scope": "Disjoint from our 4 tuning episodes, our 24 development episodes and their initial geometry. Still from the pretrained model's training dataset, not a test split.",
+        "minimum_episode_length": 26,
+        "network_cap_new_response_bytes_including_retry_reservations": 300000000,
+        "normalization_sha256": "203a1c0f342309896c96167a8df64159d5629c803022fd245baa0b6134c85795",
+        "normalization_source": "experiments/frontier_2026_09_26/round37/data_sources/normalization.json",
+        "purpose": "Fresh evaluation cohort for the quality gate of protocol 2026-11-10.",
+        "schema_version": 1,
+        "selected_episode_count": 96,
+        "selection_outcomes_accessed": false,
+        "source_episode_count": 18685,
+        "source_size_bytes": 46300921856,
+        "source_url": "https://drive.usercontent.google.com/download?id=1JwsNso_ZWBh2FyVKObR4Km2XmjCN1-HM&export=download&confirm=t",
+        "state_steps": 26,
+        "stored_order": "Ascending episode ID (needed for HDF5 indexing). The npz stores the stratum of each row.",
+        "strata": "For s=0..23: [floor(s*episode_count/24), floor((s+1)*episode_count/24)). Same as round37.",
+        "stratum_count": 24,
+        "tuning_starts_source": "experiments/frontier_2026_09_26/round35/data_sources/pusht_four_episode_original_sample.npz",
+        "tuning_starts_source_sha256": "de4a2a1856255e0b5cad57d0ffe5e2d31885a2ee415e38dfcfa68627430192ea"
+      }
+    },
+    "cohort_source_mirror": {
+      "original_path": "lewm/assets/cohort/source_mirror.json",
+      "sha256": "b3245da043fc044cf00654f3854ea062052d7febc23d2fa60346809f0c2f05c7",
+      "json_indent": 2,
+      "trailing_newline": true,
+      "content": {
+        "amendment": "The source of the frozen selection rule changes from the Google Drive HDF5 file to the Hugging Face Lance copy of the same dataset. selection_rule.json is not changed.",
+        "amendment_date": "2026-11-10",
+        "episode_identity": "Row r of the Lance dataset (fragments in manifest order) is row r of the original HDF5 file, with the same episode IDs. Shown for the 28 reference episodes (24 development and 4 tuning: first row, length and every stored row) and for the total row count 2336736. Episode offsets come from the full episode_idx and step_idx columns of the mirror.",
+        "equivalence_evidence_file": "mirror_validation.json",
+        "equivalence_evidence_sha256": "df05944d64ce54628df7a8dfbbcf62ce63a032101cdbef81d456f5bb75216b8f",
+        "equivalence_rule": "If states or actions are not bitwise equal, or the episode mapping disagrees, nothing else is retrieved.",
+        "mirror_whole_file_hash_verified": false,
+        "new_source": {
+          "dataset_path": "pusht_expert_train.lance",
+          "dataset_version": 1,
+          "file_format_version": "2.0",
+          "fragments": [
+            {
+              "data_file": "10011001001010101001100098485843b0a8c4cb5b64d0806c.lance",
+              "fragment_id": 0,
+              "rows": 1048576
+            },
+            {
+              "data_file": "1111110011111000010111101759ac4e43a40c21ae09df5d96.lance",
+              "fragment_id": 1,
+              "rows": 1048576
+            },
+            {
+              "data_file": "011001101000011110010111ae839845129e8ea7a258f34f11.lance",
+              "fragment_id": 2,
+              "rows": 239584
+            }
+          ],
+          "kind": "Hugging Face dataset repository, Lance dataset",
+          "pinned_files": [
+            {
+              "id": "db3d8c3cf593f74d0ac979868972a9c5631b68e5",
+              "id_kind": "git_oid",
+              "path": "pusht_expert_train.lance/_versions/18446744073709551614.manifest",
+              "size": 1388
+            },
+            {
+              "id": "61e429391abff56724063b593336f86fdf6d810b",
+              "id_kind": "git_oid",
+              "path": "pusht_expert_train.lance/_transactions/0-fec700d6-07f6-4898-a633-d47c60baf92f.txn",
+              "size": 652
+            },
+            {
+              "id": "9e813b5589454d9d7df2d3d4ca8e564a8e8a9a83038aaa181ecdf48c8e927e3f",
+              "id_kind": "lfs_sha256",
+              "path": "pusht_expert_train.lance/data/10011001001010101001100098485843b0a8c4cb5b64d0806c.lance",
+              "size": 6438539739
+            },
+            {
+              "id": "245e1ec041558aa27696951aad1e9e7a737b57067d840877408cb0b6cdbd2955",
+              "id_kind": "lfs_sha256",
+              "path": "pusht_expert_train.lance/data/1111110011111000010111101759ac4e43a40c21ae09df5d96.lance",
+              "size": 6380006717
+            },
+            {
+              "id": "141d8ad91dc474ea009916e5d1d1fde82ecf33e869f20fb7a9d8b351e4e75f51",
+              "id_kind": "lfs_sha256",
+              "path": "pusht_expert_train.lance/data/011001101000011110010111ae839845129e8ea7a258f34f11.lance",
+              "size": 1476533575
+            }
+          ],
+          "read_method": "pylance through the local logging proxy of retrieve_from_hf_mirror.py on 127.0.0.1: pinned files only, every upstream range journaled with its SHA-256, exact ranges cached, the network cap counted over every receipt in cohort/.",
+          "repo": "galilai-group/lewm-pusht",
+          "repo_type": "dataset",
+          "resolve_url_prefix": "https://huggingface.co/datasets/galilai-group/lewm-pusht/resolve/ea321e392348e3c65a18ab0d685f00e57be2c3e0",
+          "revision": "ea321e392348e3c65a18ab0d685f00e57be2c3e0",
+          "row_count": 2336736
+        },
+        "original_source": {
+          "kind": "Google Drive HDF5 file pusht_expert_train.h5",
+          "source_episode_count": 18685,
+          "source_size_bytes": 46300921856,
+          "source_url": "https://drive.usercontent.google.com/download?id=1JwsNso_ZWBh2FyVKObR4Km2XmjCN1-HM&export=download&confirm=t"
+        },
+        "pixels": "The mirror stores each frame as a JPEG file. Cohort pixels are these JPEGs decoded with Pillow (versions in the evidence file), not the original lossless HDF5 frames. The evidence file reports their difference from the original frames of the reference episodes.",
+        "reason": "On 2026-11-10 Google Drive answered range requests for the HDF5 file with its \"Quota exceeded\" page, after 15 served requests of HDF5 metadata. No episode had been selected or read.",
+        "rule_file": "selection_rule.json",
+        "rule_sha256": "117ea22893226437fd91b2d149c636e953b11ab5f7537b490764e919c703d111",
+        "schema_version": 1,
+        "unchanged_rule_parts": [
+          "strata",
+          "candidate order",
+          "eligibility",
+          "4 episodes per stratum",
+          "geometry tolerances",
+          "excluded tuning and development episode IDs",
+          "action normalization file",
+          "state, action and frame steps",
+          "network cap of the rule, counted over the Drive journals, the probe receipts and the Hugging Face journals"
+        ]
+      }
+    },
+    "cohort_validation_report": {
+      "original_path": "lewm/assets/cohort/validation_report.json",
+      "sha256": "a736d9d80b4c4a1f5b0c4fd3a5e473f235ede73be40d9d2dfe3223e333f57aad",
+      "json_indent": 2,
+      "trailing_newline": true,
+      "content": {
+        "all_checks_passed": true,
+        "failures": [],
+        "npz_sha256": "0a7e80f12cdbd06c87367b7f3e184271d903e916ff3b95be47a8186486dc488a",
+        "episode_ids": [
+          404,
+          505,
+          606,
+          707,
+          1212,
+          1313,
+          1414,
+          1515,
+          2020,
+          2121,
+          2222,
+          2323,
+          2727,
+          2828,
+          2929,
+          3030,
+          3535,
+          3636,
+          3737,
+          3838,
+          4343,
+          4444,
+          4545,
+          4646,
+          4747,
+          5151,
+          5252,
+          5353,
+          5858,
+          5959,
+          6060,
+          6161,
+          6666,
+          6767,
+          6868,
+          6969,
+          7474,
+          7575,
+          7676,
+          7777,
+          8181,
+          8282,
+          8383,
+          8484,
+          8989,
+          9090,
+          9191,
+          9292,
+          9393,
+          9797,
+          9898,
+          10100,
+          10201,
+          10605,
+          10706,
+          10807,
+          11312,
+          11413,
+          11514,
+          11615,
+          12120,
+          12221,
+          12322,
+          12423,
+          12928,
+          13029,
+          13130,
+          13231,
+          13635,
+          13736,
+          13837,
+          13938,
+          14443,
+          14544,
+          14645,
+          14746,
+          15251,
+          15352,
+          15453,
+          15554,
+          15655,
+          16059,
+          16160,
+          16261,
+          16766,
+          16867,
+          16968,
+          17069,
+          17574,
+          17675,
+          17776,
+          17877,
+          17978,
+          18382,
+          18483,
+          18584
+        ],
+        "geometry_comparisons": 7248,
+        "smallest_position_max_abs_difference": 14.330902099609375,
+        "receipts": {
+          "drive_journals": {
+            "files": 5,
+            "requests": 20,
+            "failed_requests": 5,
+            "reserved_bytes": 59069,
+            "received_bytes": 26229
+          },
+          "probe_receipts": {
+            "files": 2,
+            "requests": 210,
+            "failed_requests": 0,
+            "reserved_bytes": 357184,
+            "received_bytes": 357184
+          },
+          "hf_journals": {
+            "files": 3,
+            "requests": 9741,
+            "failed_requests": 0,
+            "reserved_bytes": 27994894,
+            "received_bytes": 27994894
+          },
+          "counted_bytes": 28411147,
+          "cap_bytes": 300000000
+        },
+        "mirror_check": {
+          "file": "mirror_validation.json",
+          "present": true,
+          "sha256": "df05944d64ce54628df7a8dfbbcf62ce63a032101cdbef81d456f5bb75216b8f",
+          "passed": true,
+          "failures": [],
+          "source_mirror_sha256": "b3245da043fc044cf00654f3854ea062052d7febc23d2fa60346809f0c2f05c7",
+          "source_revision": "ea321e392348e3c65a18ab0d685f00e57be2c3e0",
+          "row_count": 2336736,
+          "episode_count": 18685,
+          "reference_counts": {
+            "development": {
+              "episodes": 24,
+              "passed": 24,
+              "states_bitwise_equal": 24,
+              "raw_actions_bitwise_equal": 24,
+              "proprio_bitwise_equal": 24,
+              "mapping_agrees": 24,
+              "frame_decode_errors": 0
+            },
+            "tuning": {
+              "episodes": 4,
+              "passed": 4,
+              "states_bitwise_equal": 4,
+              "raw_actions_bitwise_equal": 4,
+              "proprio_bitwise_equal": 4,
+              "mapping_agrees": 4,
+              "frame_decode_errors": 0
+            }
+          },
+          "pixel_summary": {
+            "development": {
+              "0": {
+                "frames": 24,
+                "bitwise_equal_frames": 0,
+                "mean_of_mean_abs_difference": 0.12241327194940477,
+                "max_of_max_abs_difference": 25
+              },
+              "24": {
+                "frames": 24,
+                "bitwise_equal_frames": 0,
+                "mean_of_mean_abs_difference": 0.1226117400085034,
+                "max_of_max_abs_difference": 19
+              },
+              "25": {
+                "frames": 24,
+                "bitwise_equal_frames": 0,
+                "mean_of_mean_abs_difference": 0.12156431583049887,
+                "max_of_max_abs_difference": 20
+              }
+            },
+            "tuning": {
+              "0": {
+                "frames": 4,
+                "bitwise_equal_frames": 0,
+                "mean_of_mean_abs_difference": 0.11753128985969388,
+                "max_of_max_abs_difference": 19
+              },
+              "24": {
+                "frames": 4,
+                "bitwise_equal_frames": 0,
+                "mean_of_mean_abs_difference": 0.11509984853316327,
+                "max_of_max_abs_difference": 19
+              },
+              "25": {
+                "frames": 4,
+                "bitwise_equal_frames": 0,
+                "mean_of_mean_abs_difference": 0.11733531303146258,
+                "max_of_max_abs_difference": 18
+              }
+            }
+          }
+        },
+        "network_bytes_of_this_check": 0,
+        "held_out_from_pretrained_model_training": false
+      }
+    },
+    "simulator_wheel": {
+      "original_path": "lewm/simulator/source_receipt.json",
+      "sha256": "f70b1300a2dfed1555362087b753a403b921cb8f6821ee51cd5dc100692a9f5a",
+      "json_indent": 2,
+      "trailing_newline": true,
+      "content": {
+        "source_url": "https://files.pythonhosted.org/packages/77/ac/9618ee77bf0ed0180c67a0645dfb42215f54197de347235c831f65ea6363/stable_worldmodel-0.0.6-py3-none-any.whl",
+        "bytes": 208095,
+        "sha256": "90601307b3430436d617a5134579089414a1f98eab1dfb6aeabf36ea7f46ff4d",
+        "pinned_version": "0.0.6",
+        "source_changes": []
+      }
+    },
+    "simulator_files": {
+      "original_path": "lewm/simulator/source_hashes.json",
+      "sha256": "68ecda012b084696fa67e063949c174e8c2bf411331489ad565e1ca1ab3c4cc4",
+      "json_indent": 2,
+      "trailing_newline": true,
+      "content": {
+        "stable_worldmodel/__init__.py": "098841b3d30e15ebc9ef7d6f4448b971c33369b93d9cd3a4a7b7b94e548f223a",
+        "stable_worldmodel/spaces.py": "1c4346e3498c70ef0f4ea3f8320687e52fd601d973907703bdcc5f90bf09b220",
+        "stable_worldmodel/utils.py": "58b5df5e11222ca1ecf07d913939c219b34721644a1d285a9143c440ff2f9ad5",
+        "stable_worldmodel/envs/__init__.py": "3ae8cbbeecfb0dc52886dd6a1defec6caa3bf5e8df5d7d8f15ee559f4e584d95",
+        "stable_worldmodel/envs/utils.py": "38314dcabc556c954d64b1c2a1b558e32b48a0db092657dd745dcb960c9cf6f0",
+        "stable_worldmodel/envs/pusht/env.py": "d8d0de35aaab5b846db4e79b0fbfd6b17375178cce40a25df5301c8030ca6d68"
+      }
+    }
+  },
+  "not_included": {
+    "lewm/assets/cohort/cohort_manifest.json": {
+      "sha256": "ae687b7a1ff079bcc4129247c419e1b26f0b61ed282423f79bc86571773c3ed1",
+      "bytes": 75300,
+      "summary": "Retrieval manifest: source revision, pinned files, per-frame JPEG hashes, network receipt totals."
+    },
+    "lewm/assets/cohort/mirror_validation.json": {
+      "sha256": "df05944d64ce54628df7a8dfbbcf62ce63a032101cdbef81d456f5bb75216b8f",
+      "bytes": 75234,
+      "summary": "Mirror check: states and actions of 28 reference episodes bitwise equal between the original HDF5 file and the Hugging Face copy."
+    },
+    "lewm/assets/cohort/expert_control_check.json": {
+      "sha256": "18575d0dbb184ed3e6918c281d4c794db864d195dd07a3e37331a9480a71ce8c",
+      "bytes": 38645,
+      "summary": "Recorded expert actions succeed on all 96 cohort episodes (first success at command 20 to 25)."
+    }
+  }
+}
