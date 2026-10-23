@@ -1,4 +1,4 @@
-"""Tests: pinned assets, statistics, model loading and the PushT simulator.
+"""Tests: pinned assets, statistics, model loading, the PushT simulator and CUDA planners.
 
 Run: python -m pytest -q test_project.py
 The first run downloads the pinned checkpoint and upstream sources into .cache/.
@@ -14,6 +14,7 @@ import torch
 
 import experiments as E
 import model as M
+import optimizations as O
 import upstream
 
 HAS_SIMULATOR_DEPS = importlib.util.find_spec('pymunk') is not None
@@ -123,6 +124,17 @@ class SimulatorTest(unittest.TestCase):
         self.assertTrue(expert['success'])
         self.assertGreaterEqual(expert['first_success'], 20)
         self.assertFalse(zero['success'])
+
+
+@unittest.skipUnless(torch.cuda.is_available(), 'CUDA not available')
+class CudaTest(unittest.TestCase):
+    def test_compiled_baseline_matches_eager_baseline(self):
+        model = M.load_model('cuda')
+        pair = M.image_pair(12)
+        reference = M.request(model, *pair, 47)
+        compiled = O.CompiledGraphBaseline(model).request(*pair, 47)
+        for key in reference:
+            torch.testing.assert_close(compiled[key], reference[key], rtol=1e-4, atol=1e-4)
 
 
 if __name__ == '__main__':

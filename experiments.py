@@ -26,6 +26,7 @@ import numpy as np
 import torch
 
 import model as M
+import optimizations as O
 import upstream
 
 ROOT = Path(__file__).resolve().parent
@@ -179,8 +180,30 @@ def quality_gate(records, reference_policy, variant_policy, margin=0.075,
 # Planner configurations
 # ---------------------------------------------------------------------------
 
-#   baseline  - released rollout and native CEM, eager PyTorch
-CONFIGS = ['baseline']
+#   baseline           - released rollout and native CEM, eager PyTorch
+#   baseline_compiled  - unchanged baseline + torch.compile + one CUDA graph per CEM round (CUDA)
+CONFIGS = ['baseline', 'baseline_compiled']
+CPU_CONFIGS = ['baseline']
+# Same-search configurations must reproduce the baseline plan up to FP32 rounding.
+SAME_SEARCH = ['baseline_compiled']
+
+PLANNERS = {}
+
+
+def cuda_planner(model, name):
+    """Build each CUDA planner once and reuse it; compilation and capture are cold-start cost."""
+    key = (id(model), name)
+    if key in PLANNERS:
+        return PLANNERS[key]
+    device = str(next(model.parameters()).device)
+    if not device.startswith('cuda'):
+        raise ValueError(f'{name} requires --device cuda')
+    if name == 'baseline_compiled':
+        planner = O.CompiledGraphBaseline(model)
+    else:
+        raise ValueError(f'Unknown configuration {name!r}')
+    PLANNERS[key] = planner
+    return planner
 
 
 def run(model, pair, seed, name):
@@ -188,7 +211,8 @@ def run(model, pair, seed, name):
     pixels, goal = pair
     if name == 'baseline':
         return M.request(model, pixels, goal, seed)
-    raise ValueError(f'Unknown configuration {name!r}')
+    planner = cuda_planner(model, name)
+    return planner.request(pixels, goal, seed)
 
 
 def max_difference(first, second):
@@ -200,7 +224,12 @@ def max_difference(first, second):
 
 def output_checks(model, pair, seed, outputs):
     """Largest absolute plan differences against the matching reference search."""
-    return {}
+    checks = {}
+    if 'baseline' in outputs:
+        for name in SAME_SEARCH:
+            if name in outputs:
+                checks[f'{name}_vs_baseline_max_abs'] = max_difference(outputs['baseline'], outputs[name])
+    return checks
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +317,11 @@ def print_scene_table(scene, args, configs, summary, speedups_vs_baseline, speed
 
 
 def benchmark(args):
-    configs = args.configs or CONFIGS
+    configs = args.configs
+    if configs is None and args.device.startswith('cuda'):
+        configs = CONFIGS
+    if configs is None:
+        configs = CPU_CONFIGS
     model = M.load_model(args.device)
     report = {
         'environment': environment_record(args.device),
