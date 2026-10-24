@@ -123,14 +123,14 @@ def solve(cost, seed, device):
 
 
 @torch.inference_mode()
-def request(model, pixels, goal, seed):
+def request(model, pixels, goal, seed, rollout=baseline_rollout):
     """One planning request: CPU images in, CPU plan out (encode both images, then 30 CEM rounds)."""
     device = next(model.parameters()).device
     z = model.encode({'pixels': pixels.to(device)})['emb']
     target = model.encode({'pixels': goal.to(device)})['emb'][:, -1]
 
     def cost(candidates):
-        prediction = baseline_rollout(model, z, candidates)
+        prediction = rollout(model, z, candidates)
         return (prediction - target[:, None]).square().sum(-1)
 
     return solve(cost, seed, device)

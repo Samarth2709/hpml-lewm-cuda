@@ -182,10 +182,11 @@ def quality_gate(records, reference_policy, variant_policy, margin=0.075,
 
 #   baseline           - released rollout and native CEM, eager PyTorch
 #   baseline_compiled  - unchanged baseline + torch.compile + one CUDA graph per CEM round (CUDA)
-CONFIGS = ['baseline', 'baseline_compiled']
-CPU_CONFIGS = ['baseline']
+#   optimized          - optimized rollout (optimizations.rollout), same search, eager PyTorch
+CONFIGS = ['baseline', 'baseline_compiled', 'optimized']
+CPU_CONFIGS = ['baseline', 'optimized']
 # Same-search configurations must reproduce the baseline plan up to FP32 rounding.
-SAME_SEARCH = ['baseline_compiled']
+SAME_SEARCH = ['baseline_compiled', 'optimized']
 
 PLANNERS = {}
 
@@ -211,6 +212,8 @@ def run(model, pair, seed, name):
     pixels, goal = pair
     if name == 'baseline':
         return M.request(model, pixels, goal, seed)
+    if name == 'optimized':
+        return M.request(model, pixels, goal, seed, rollout=O.rollout)
     planner = cuda_planner(model, name)
     return planner.request(pixels, goal, seed)
 
