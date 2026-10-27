@@ -5,6 +5,8 @@ Rollout optimizations, in the order they were added:
   1. Growing-prefix K/V cache: steps 1-3 only append one token to the window, so the
      keys/values of earlier tokens are reused. Steps 4-5 shift the 3-position window
      (positions reset), so they are recomputed.
+  2. Last-output pruning: the rollout only consumes the newest prediction, so the last
+     block of a shifted window computes only the newest query and MLP row.
 """
 import time
 
@@ -134,6 +136,46 @@ def prefix_step(model, x, c, position, cache):
     return prediction, cache
 
 
+def window_attention(attn, x):
+    """Causal self-attention over a full 1-3 position window, including both projections."""
+    q, k, v = attn.to_qkv(attn.norm(x)).chunk(3, -1)
+    q = split_heads(attn, q)
+    k = split_heads(attn, k)
+    v = split_heads(attn, v)
+    value = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    return attn.to_out(merge_heads(value, x.shape[1]))
+
+
+def window_step(model, x, c):
+    """Predict from a shifted 3-position window. The last block computes only the newest row."""
+    predictor = model.predictor
+    transformer = predictor.transformer
+    position_embedding = predictor.pos_embedding[:, :x.shape[1]]
+    x = transformer.input_proj(predictor.dropout(x + position_embedding))
+    c = transformer.cond_proj(c)
+    for block in transformer.layers[:-1]:
+        shift, scale, gate, shift_ff, scale_ff, gate_ff = block.adaLN_modulation(c).chunk(6, -1)
+        hidden = modulation(block.norm1(x), shift, scale)
+        x = residual(x, gate, window_attention(block.attn, hidden))
+        hidden = modulation(block.norm2(x), shift_ff, scale_ff)
+        x = residual(x, gate_ff, block.mlp(hidden))
+
+    block = transformer.layers[-1]
+    shift, scale, gate, shift_ff, scale_ff, gate_ff = block.adaLN_modulation(c).chunk(6, -1)
+    attn = block.attn
+    hidden = modulation(block.norm1(x), shift, scale)
+    q, k, v = attn.to_qkv(attn.norm(hidden)).chunk(3, -1)
+    # Only the newest row is needed. Its query sees the whole window, so no mask is needed.
+    q = split_heads(attn, q[:, -1:])
+    k = split_heads(attn, k)
+    v = split_heads(attn, v)
+    value = F.scaled_dot_product_attention(q, k, v)
+    x = residual(x[:, -1:], gate[:, -1:], attn.to_out(merge_heads(value, 1)))
+    hidden = modulation(block.norm2(x), shift_ff[:, -1:], scale_ff[:, -1:])
+    x = residual(x, gate_ff[:, -1:], block.mlp(hidden))
+    return predicted_latents(model, x)
+
+
 def rollout(model, z, actions):
     """Optimized rollout of 300 candidates from one start. Same result as model.baseline_rollout."""
     check_rollout_inputs(z, actions)
@@ -146,7 +188,7 @@ def rollout(model, z, actions):
             prediction, cache = prefix_step(model, x[:, -1:], c[:, -1:], depth, cache)
         else:
             # Positions shift from here on, so the cached keys/values would be invalid.
-            prediction = model.predict(x[:, -3:], c)[:, -1:]
+            prediction = window_step(model, x[:, -3:], c)
         if depth < 4:
             x = torch.cat((x, prediction), dim=1)
     return prediction.reshape(1, 300, 192)
