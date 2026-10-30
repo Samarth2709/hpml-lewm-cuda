@@ -7,8 +7,11 @@ Rollout optimizations, in the order they were added:
      (positions reset), so they are recomputed.
   2. Last-output pruning: the rollout only consumes the newest prediction, so the last
      block of a shifted window computes only the newest query and MLP row.
+  3. Pointwise fusion: AdaLN modulation and gated residuals are torch.compile'd kernels.
+     Matrix multiplies stay in native PyTorch.
 """
 import time
+from functools import lru_cache
 
 import torch
 from torch.nn import functional as F
@@ -84,6 +87,14 @@ def residual(x, gate, branch):
     return x + gate * branch
 
 
+@lru_cache(maxsize=1)
+def kernels():
+    """Compiled (modulation, residual) kernels used by the rollout steps."""
+    fused_modulation = torch.compile(modulation, fullgraph=True, dynamic=False)
+    fused_residual = torch.compile(residual, fullgraph=True, dynamic=False)
+    return fused_modulation, fused_residual
+
+
 def split_heads(attn, t):
     """[B, T, heads*64] -> [B, heads, T, 64]"""
     return t.reshape(t.shape[0], t.shape[1], attn.heads, -1).transpose(1, 2)
@@ -103,8 +114,9 @@ def predicted_latents(model, hidden):
     return model.pred_proj(flat).reshape(rows, 1, -1)
 
 
-def prefix_step(model, x, c, position, cache):
+def prefix_step(model, x, c, position, cache, ops):
     """Predict from one new token at prefix position 0/1/2 and append its K/V to the per-layer cache."""
+    mod, res = ops
     predictor = model.predictor
     transformer = predictor.transformer
     position_embedding = predictor.pos_embedding[:, position:position + 1]
@@ -115,7 +127,7 @@ def prefix_step(model, x, c, position, cache):
     for index, block in enumerate(transformer.layers):
         shift, scale, gate, shift_ff, scale_ff, gate_ff = block.adaLN_modulation(c).chunk(6, -1)
         attn = block.attn
-        hidden = modulation(block.norm1(x), shift, scale)
+        hidden = mod(block.norm1(x), shift, scale)
         q, k, v = attn.to_qkv(attn.norm(hidden)).chunk(3, -1)
         q = split_heads(attn, q)
         k = split_heads(attn, k)
@@ -126,9 +138,9 @@ def prefix_step(model, x, c, position, cache):
             v = torch.cat((old_v, v), dim=2)
         # The newest token may attend to every earlier token, so no mask is needed.
         value = F.scaled_dot_product_attention(q, k, v)
-        x = residual(x, gate, attn.to_out(merge_heads(value, 1)))
-        hidden = modulation(block.norm2(x), shift_ff, scale_ff)
-        x = residual(x, gate_ff, block.mlp(hidden))
+        x = res(x, gate, attn.to_out(merge_heads(value, 1)))
+        hidden = mod(block.norm2(x), shift_ff, scale_ff)
+        x = res(x, gate_ff, block.mlp(hidden))
         cache[index] = (k, v)
     prediction = predicted_latents(model, x)
     if position == 2:
@@ -146,8 +158,9 @@ def window_attention(attn, x):
     return attn.to_out(merge_heads(value, x.shape[1]))
 
 
-def window_step(model, x, c):
+def window_step(model, x, c, ops):
     """Predict from a shifted 3-position window. The last block computes only the newest row."""
+    mod, res = ops
     predictor = model.predictor
     transformer = predictor.transformer
     position_embedding = predictor.pos_embedding[:, :x.shape[1]]
@@ -155,24 +168,24 @@ def window_step(model, x, c):
     c = transformer.cond_proj(c)
     for block in transformer.layers[:-1]:
         shift, scale, gate, shift_ff, scale_ff, gate_ff = block.adaLN_modulation(c).chunk(6, -1)
-        hidden = modulation(block.norm1(x), shift, scale)
-        x = residual(x, gate, window_attention(block.attn, hidden))
-        hidden = modulation(block.norm2(x), shift_ff, scale_ff)
-        x = residual(x, gate_ff, block.mlp(hidden))
+        hidden = mod(block.norm1(x), shift, scale)
+        x = res(x, gate, window_attention(block.attn, hidden))
+        hidden = mod(block.norm2(x), shift_ff, scale_ff)
+        x = res(x, gate_ff, block.mlp(hidden))
 
     block = transformer.layers[-1]
     shift, scale, gate, shift_ff, scale_ff, gate_ff = block.adaLN_modulation(c).chunk(6, -1)
     attn = block.attn
-    hidden = modulation(block.norm1(x), shift, scale)
+    hidden = mod(block.norm1(x), shift, scale)
     q, k, v = attn.to_qkv(attn.norm(hidden)).chunk(3, -1)
     # Only the newest row is needed. Its query sees the whole window, so no mask is needed.
     q = split_heads(attn, q[:, -1:])
     k = split_heads(attn, k)
     v = split_heads(attn, v)
     value = F.scaled_dot_product_attention(q, k, v)
-    x = residual(x[:, -1:], gate[:, -1:], attn.to_out(merge_heads(value, 1)))
-    hidden = modulation(block.norm2(x), shift_ff[:, -1:], scale_ff[:, -1:])
-    x = residual(x, gate_ff[:, -1:], block.mlp(hidden))
+    x = res(x[:, -1:], gate[:, -1:], attn.to_out(merge_heads(value, 1)))
+    hidden = mod(block.norm2(x), shift_ff[:, -1:], scale_ff[:, -1:])
+    x = res(x, gate_ff[:, -1:], block.mlp(hidden))
     return predicted_latents(model, x)
 
 
@@ -181,14 +194,15 @@ def rollout(model, z, actions):
     check_rollout_inputs(z, actions)
     flat_actions = actions.reshape(300, 5, 10)
     x = z.expand(300, 1, 192).contiguous()
+    ops = kernels()
     cache = None
     for depth in range(5):
         c = model.action_encoder(flat_actions[:, :depth + 1])[:, -3:]
         if depth < 3:
-            prediction, cache = prefix_step(model, x[:, -1:], c[:, -1:], depth, cache)
+            prediction, cache = prefix_step(model, x[:, -1:], c[:, -1:], depth, cache, ops)
         else:
             # Positions shift from here on, so the cached keys/values would be invalid.
-            prediction = window_step(model, x[:, -3:], c)
+            prediction = window_step(model, x[:, -3:], c, ops)
         if depth < 4:
             x = torch.cat((x, prediction), dim=1)
     return prediction.reshape(1, 300, 192)
