@@ -9,12 +9,13 @@ Rollout optimizations, in the order they were added:
      block of a shifted window computes only the newest query and MLP row.
   3. Pointwise fusion: AdaLN modulation and gated residuals are torch.compile'd kernels.
      Matrix multiplies stay in native PyTorch.
+  4. Explicit short attention: with only 1-3 keys, attention is written as compiled FP32
+     products, a softmax and sums instead of a scaled_dot_product_attention call.
 """
 import time
 from functools import lru_cache
 
 import torch
-from torch.nn import functional as F
 
 import model as M
 
@@ -87,12 +88,34 @@ def residual(x, gate, branch):
     return x + gate * branch
 
 
+def explicit_attention(q, k, v, mask):
+    """Attention for 1-3 keys: [B,H,Q,64] queries, [B,H,K,64] keys/values, [Q,K] boolean mask."""
+    scale = q.shape[-1] ** -0.5
+    scores = (q.unsqueeze(-2) * k.unsqueeze(-3)).sum(-1) * scale
+    weights = scores.masked_fill(~mask, float('-inf')).softmax(-1)
+    return (weights.unsqueeze(-1) * v.unsqueeze(-3)).sum(-2)
+
+
 @lru_cache(maxsize=1)
 def kernels():
-    """Compiled (modulation, residual) kernels used by the rollout steps."""
+    """Compiled (modulation, residual, attention) kernels used by the rollout steps."""
     fused_modulation = torch.compile(modulation, fullgraph=True, dynamic=False)
     fused_residual = torch.compile(residual, fullgraph=True, dynamic=False)
-    return fused_modulation, fused_residual
+    fused_attention = torch.compile(explicit_attention, fullgraph=True, dynamic=False)
+    return fused_modulation, fused_residual, fused_attention
+
+
+@lru_cache(maxsize=12)
+def attention_mask(queries, keys, device, causal):
+    mask = torch.ones(queries, keys, device=device, dtype=torch.bool)
+    if causal:
+        mask = mask.tril()
+    return mask
+
+
+def short_attention(q, k, v, causal, attend):
+    mask = attention_mask(q.shape[2], k.shape[2], q.device, causal)
+    return attend(q, k, v, mask)
 
 
 def split_heads(attn, t):
@@ -116,7 +139,7 @@ def predicted_latents(model, hidden):
 
 def prefix_step(model, x, c, position, cache, ops):
     """Predict from one new token at prefix position 0/1/2 and append its K/V to the per-layer cache."""
-    mod, res = ops
+    mod, res, attend = ops
     predictor = model.predictor
     transformer = predictor.transformer
     position_embedding = predictor.pos_embedding[:, position:position + 1]
@@ -136,8 +159,8 @@ def prefix_step(model, x, c, position, cache, ops):
             old_k, old_v = cache[index]
             k = torch.cat((old_k, k), dim=2)
             v = torch.cat((old_v, v), dim=2)
-        # The newest token may attend to every earlier token, so no mask is needed.
-        value = F.scaled_dot_product_attention(q, k, v)
+        # The newest token may attend to every earlier token (non-causal, one query).
+        value = short_attention(q, k, v, False, attend)
         x = res(x, gate, attn.to_out(merge_heads(value, 1)))
         hidden = mod(block.norm2(x), shift_ff, scale_ff)
         x = res(x, gate_ff, block.mlp(hidden))
@@ -148,19 +171,19 @@ def prefix_step(model, x, c, position, cache, ops):
     return prediction, cache
 
 
-def window_attention(attn, x):
+def window_attention(attn, x, attend):
     """Causal self-attention over a full 1-3 position window, including both projections."""
     q, k, v = attn.to_qkv(attn.norm(x)).chunk(3, -1)
     q = split_heads(attn, q)
     k = split_heads(attn, k)
     v = split_heads(attn, v)
-    value = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    value = short_attention(q, k, v, True, attend)
     return attn.to_out(merge_heads(value, x.shape[1]))
 
 
 def window_step(model, x, c, ops):
     """Predict from a shifted 3-position window. The last block computes only the newest row."""
-    mod, res = ops
+    mod, res, attend = ops
     predictor = model.predictor
     transformer = predictor.transformer
     position_embedding = predictor.pos_embedding[:, :x.shape[1]]
@@ -169,7 +192,7 @@ def window_step(model, x, c, ops):
     for block in transformer.layers[:-1]:
         shift, scale, gate, shift_ff, scale_ff, gate_ff = block.adaLN_modulation(c).chunk(6, -1)
         hidden = mod(block.norm1(x), shift, scale)
-        x = res(x, gate, window_attention(block.attn, hidden))
+        x = res(x, gate, window_attention(block.attn, hidden, attend))
         hidden = mod(block.norm2(x), shift_ff, scale_ff)
         x = res(x, gate_ff, block.mlp(hidden))
 
@@ -178,11 +201,11 @@ def window_step(model, x, c, ops):
     attn = block.attn
     hidden = mod(block.norm1(x), shift, scale)
     q, k, v = attn.to_qkv(attn.norm(hidden)).chunk(3, -1)
-    # Only the newest row is needed. Its query sees the whole window, so no mask is needed.
+    # Only the newest row is needed. Its query sees the whole window (non-causal, one query).
     q = split_heads(attn, q[:, -1:])
     k = split_heads(attn, k)
     v = split_heads(attn, v)
-    value = F.scaled_dot_product_attention(q, k, v)
+    value = short_attention(q, k, v, False, attend)
     x = res(x[:, -1:], gate[:, -1:], attn.to_out(merge_heads(value, 1)))
     hidden = mod(block.norm2(x), shift_ff[:, -1:], scale_ff[:, -1:])
     x = res(x, gate_ff[:, -1:], block.mlp(hidden))
