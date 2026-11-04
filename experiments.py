@@ -183,10 +183,14 @@ def quality_gate(records, reference_policy, variant_policy, margin=0.075,
 #   baseline           - released rollout and native CEM, eager PyTorch
 #   baseline_compiled  - unchanged baseline + torch.compile + one CUDA graph per CEM round (CUDA)
 #   optimized          - optimized rollout (optimizations.rollout), same search, eager PyTorch
-CONFIGS = ['baseline', 'baseline_compiled', 'optimized']
-CPU_CONFIGS = ['baseline', 'optimized']
+#   optimized_tree     - optimized rollout on shared-prefix tree proposals ('late'), eager PyTorch
+CONFIGS = ['baseline', 'baseline_compiled', 'optimized', 'optimized_tree']
+CPU_CONFIGS = ['baseline', 'optimized', 'optimized_tree']
 # Same-search configurations must reproduce the baseline plan up to FP32 rounding.
 SAME_SEARCH = ['baseline_compiled', 'optimized']
+# Tree configurations change the proposals; they are compared with the same tree search
+# evaluated leaf by leaf (the 'independent' rollout on tree-shaped candidates).
+TREE_SEARCH = ['optimized_tree']
 
 PLANNERS = {}
 
@@ -207,6 +211,10 @@ def cuda_planner(model, name):
     return planner
 
 
+def tree_rollout(model, z, actions):
+    return O.rollout(model, z, actions, layout='late')
+
+
 def run(model, pair, seed, name):
     """Plan one request with configuration `name`. Returns the CPU plan dictionary."""
     pixels, goal = pair
@@ -214,6 +222,9 @@ def run(model, pair, seed, name):
         return M.request(model, pixels, goal, seed)
     if name == 'optimized':
         return M.request(model, pixels, goal, seed, rollout=O.rollout)
+    if name == 'optimized_tree':
+        plan = O.tree_plan('late', str(next(model.parameters()).device))
+        return M.request(model, pixels, goal, seed, rollout=tree_rollout, plan=plan)
     planner = cuda_planner(model, name)
     return planner.request(pixels, goal, seed)
 
@@ -225,6 +236,13 @@ def max_difference(first, second):
     return result
 
 
+def plans_equal(first, second):
+    for key in first:
+        if not torch.equal(first[key], second[key]):
+            return False
+    return True
+
+
 def output_checks(model, pair, seed, outputs):
     """Largest absolute plan differences against the matching reference search."""
     checks = {}
@@ -232,6 +250,17 @@ def output_checks(model, pair, seed, outputs):
         for name in SAME_SEARCH:
             if name in outputs:
                 checks[f'{name}_vs_baseline_max_abs'] = max_difference(outputs['baseline'], outputs[name])
+    tree_names = [name for name in TREE_SEARCH if name in outputs]
+    if tree_names:
+        pixels, goal = pair
+        plan = O.tree_plan('late', str(next(model.parameters()).device))
+        reference = M.request(model, pixels, goal, seed, rollout=O.rollout, plan=plan)
+        for name in tree_names:
+            if name == 'optimized_tree':
+                checks['tree_shared_equals_independent'] = plans_equal(reference, outputs[name])
+                checks['tree_shared_vs_independent_max_abs'] = max_difference(reference, outputs[name])
+            else:
+                checks[f'{name}_vs_tree_independent_max_abs'] = max_difference(reference, outputs[name])
     return checks
 
 

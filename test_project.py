@@ -114,16 +114,33 @@ class ModelTest(unittest.TestCase):
         self.assertLess(float(error_after), float(error_before))
 
 
+class TreePlanTest(unittest.TestCase):
+    def test_leaves_share_exactly_the_declared_prefixes(self):
+        samples = torch.arange(15000, dtype=torch.float32).reshape(1, 300, 5, 10)
+        for layout in O.LAYOUTS:
+            plan = O.TreePlan(layout, 'cpu')
+            actions = plan.materialize(samples)[0]
+            for depth in range(5):
+                prefixes = actions[:, :depth + 1]
+                unique = prefixes.index_select(0, plan.representatives[depth])
+                self.assertEqual(len(torch.unique(prefixes.flatten(1), dim=0)), plan.counts[depth])
+                self.assertTrue(torch.equal(prefixes, unique.index_select(0, plan.leaf_nodes[depth])))
+        independent = O.TreePlan('independent', 'cpu').materialize(samples)
+        self.assertTrue(torch.equal(independent, samples))
+
+
 class RolloutTest(unittest.TestCase):
     @torch.inference_mode()
     def test_optimized_rollout_matches_baseline(self):
         model = cpu_model()
         gen = torch.Generator().manual_seed(0)
         z = torch.randn(1, 1, 192, generator=gen)
-        actions = torch.randn(1, 300, 5, 10, generator=gen)
-        reference = M.baseline_rollout(model, z, actions)
-        optimized = O.rollout(model, z, actions)
-        torch.testing.assert_close(optimized, reference, rtol=1e-5, atol=1e-5)
+        for layout in ('independent', 'late'):
+            samples = torch.randn(1, 300, 5, 10, generator=gen)
+            actions = O.TreePlan(layout, 'cpu').materialize(samples)
+            reference = M.baseline_rollout(model, z, actions)
+            optimized = O.rollout(model, z, actions, layout)
+            torch.testing.assert_close(optimized, reference, rtol=1e-5, atol=1e-5)
 
 
 @unittest.skipUnless(HAS_SIMULATOR_DEPS, 'PushT simulator dependencies are not installed')

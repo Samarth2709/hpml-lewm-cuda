@@ -101,8 +101,11 @@ def baseline_rollout(model, z, actions):
     return prediction.reshape(batch, samples, width)
 
 
-def solve(cost, seed, device):
-    """Native CEM: sample around the mean, keep the 30 lowest-cost candidates, refit, repeat."""
+def solve(cost, seed, device, plan=None):
+    """Native CEM: sample around the mean, keep the 30 lowest-cost candidates, refit, repeat.
+
+    `plan` (an optimizations.TreePlan) only rewrites the sampled candidates into a shared-prefix tree.
+    """
     generator = torch.Generator(device=device).manual_seed(seed)
     mean = torch.zeros(1, HORIZON, ACTION_DIM, device=device)
     std = torch.ones_like(mean)
@@ -111,6 +114,8 @@ def solve(cost, seed, device):
         noise = torch.randn(1, CANDIDATES, HORIZON, ACTION_DIM, generator=generator, device=device)
         candidates = noise * std.unsqueeze(1) + mean.unsqueeze(1)
         candidates[:, 0] = mean
+        if plan is not None:
+            candidates = plan.materialize(candidates)
         values, indices = torch.topk(cost(candidates), k=ELITES, dim=1, largest=False)
         elites = candidates[batch_index, indices]
         mean = elites.mean(dim=1)
@@ -123,7 +128,7 @@ def solve(cost, seed, device):
 
 
 @torch.inference_mode()
-def request(model, pixels, goal, seed, rollout=baseline_rollout):
+def request(model, pixels, goal, seed, rollout=baseline_rollout, plan=None):
     """One planning request: CPU images in, CPU plan out (encode both images, then 30 CEM rounds)."""
     device = next(model.parameters()).device
     z = model.encode({'pixels': pixels.to(device)})['emb']
@@ -133,4 +138,4 @@ def request(model, pixels, goal, seed, rollout=baseline_rollout):
         prediction = rollout(model, z, candidates)
         return (prediction - target[:, None]).square().sum(-1)
 
-    return solve(cost, seed, device)
+    return solve(cost, seed, device, plan)

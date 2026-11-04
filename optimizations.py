@@ -11,10 +11,14 @@ Rollout optimizations, in the order they were added:
      Matrix multiplies stay in native PyTorch.
   4. Explicit short attention: with only 1-3 keys, attention is written as compiled FP32
      products, a softmax and sums instead of a scaled_dot_product_attention call.
+  5. Shared-prefix tree ('late' layout): CEM candidates are rewritten so the 300 leaves share
+     30/30/60/60/300 unique prefixes. Each unique transition is predicted once and its latent
+     history and K/V are gathered to its children. This changes the search proposals, not the model.
 """
 import time
 from functools import lru_cache
 
+import numpy as np
 import torch
 
 import model as M
@@ -71,6 +75,82 @@ class CompiledGraphBaseline:
         return M.solve(cost, seed, device)
 
 
+# Unique tree nodes at each of the 5 predicted steps. Every layout ends with 300 leaves.
+LAYOUTS = {
+    'independent': (300, 300, 300, 300, 300),
+    'late': (30, 30, 60, 60, 300),
+}
+
+
+def index_tensor(array, device):
+    if array is None:
+        return None
+    return torch.tensor(array, dtype=torch.int64, device=device)
+
+
+class TreePlan:
+    """Static shared-prefix layout: the parent of every tree node and the node behind every leaf."""
+
+    def __init__(self, layout, device):
+        counts = LAYOUTS[layout]
+        self.layout = layout
+        self.counts = counts
+
+        # parents[d][i] = node at depth d-1 that node i at depth d continues (None: no branching).
+        parents = [None]
+        for depth in range(1, 5):
+            old = counts[depth - 1]
+            new = counts[depth]
+            if new % old != 0:
+                raise ValueError('Every node of a depth must have the same number of children')
+            if new == old:
+                parents.append(None)
+            else:
+                parents.append(np.repeat(np.arange(old), new // old))
+
+        # leaf_nodes[d][leaf] = node at depth d on the path to that leaf.
+        leaf_nodes = [None, None, None, None, np.arange(300)]
+        for depth in range(4, 0, -1):
+            if parents[depth] is None:
+                leaf_nodes[depth - 1] = leaf_nodes[depth]
+            else:
+                leaf_nodes[depth - 1] = parents[depth][leaf_nodes[depth]]
+
+        # representatives[d][node] = first leaf below that node.
+        # materialize_index[d][leaf] = representative leaf of the leaf's node at depth d.
+        representatives = []
+        materialize_index = []
+        for depth in range(5):
+            first_leaf = np.unique(leaf_nodes[depth], return_index=True)[1]
+            representatives.append(first_leaf)
+            materialize_index.append(first_leaf[leaf_nodes[depth]])
+
+        self.parents = [index_tensor(parent, device) for parent in parents]
+        self.leaf_nodes = [index_tensor(nodes, device) for nodes in leaf_nodes]
+        self.representatives = [index_tensor(first, device) for first in representatives]
+        self.materialize_index = [index_tensor(index, device) for index in materialize_index]
+
+    def materialize(self, samples):
+        """Rewrite [R,300,5,10] samples so leaves that share a node at depth d share actions up to d."""
+        columns = []
+        for depth in range(5):
+            column = samples[:, :, depth].index_select(1, self.materialize_index[depth])
+            columns.append(column)
+        return torch.stack(columns, dim=2)
+
+
+@lru_cache(maxsize=16)
+def tree_plan(layout, device):
+    return TreePlan(layout, device)
+
+
+def gather_cache(cache, index):
+    gathered = []
+    for k, v in cache:
+        gathered.append((k.index_select(0, index), v.index_select(0, index)))
+    return gathered
+
+
 def check_rollout_inputs(z, actions):
     if torch.is_grad_enabled():
         raise ValueError('The optimized rollout runs in inference mode only')
@@ -96,13 +176,31 @@ def explicit_attention(q, k, v, mask):
     return (weights.unsqueeze(-1) * v.unsqueeze(-3)).sum(-2)
 
 
-@lru_cache(maxsize=1)
-def kernels():
-    """Compiled (modulation, residual, attention) kernels used by the rollout steps."""
-    fused_modulation = torch.compile(modulation, fullgraph=True, dynamic=False)
-    fused_residual = torch.compile(residual, fullgraph=True, dynamic=False)
-    fused_attention = torch.compile(explicit_attention, fullgraph=True, dynamic=False)
-    return fused_modulation, fused_residual, fused_attention
+# Separate code objects for the dynamic-shape kernels: torch.compile caches (and its recompile
+# limit) are per code object, so sharing them with the static kernels would exhaust the limit.
+def dynamic_modulation(x, shift, scale):
+    return modulation(x, shift, scale)
+
+
+def dynamic_residual(x, gate, branch):
+    return residual(x, gate, branch)
+
+
+def dynamic_attention(q, k, v, mask):
+    return explicit_attention(q, k, v, mask)
+
+
+@lru_cache(maxsize=2)
+def kernels(dynamic):
+    """Compiled (modulation, residual, attention). Static for 300-row stages, dynamic for narrower tree stages."""
+    if dynamic:
+        functions = (dynamic_modulation, dynamic_residual, dynamic_attention)
+    else:
+        functions = (modulation, residual, explicit_attention)
+    compiled = []
+    for function in functions:
+        compiled.append(torch.compile(function, fullgraph=True, dynamic=dynamic))
+    return tuple(compiled)
 
 
 @lru_cache(maxsize=12)
@@ -212,15 +310,27 @@ def window_step(model, x, c, ops):
     return predicted_latents(model, x)
 
 
-def rollout(model, z, actions):
-    """Optimized rollout of 300 candidates from one start. Same result as model.baseline_rollout."""
+def rollout(model, z, actions, layout='independent'):
+    """Optimized rollout of 300 candidates from one start. `actions` must follow the layout's ancestry."""
     check_rollout_inputs(z, actions)
+    plan = tree_plan(layout, str(z.device))
     flat_actions = actions.reshape(300, 5, 10)
-    x = z.expand(300, 1, 192).contiguous()
-    ops = kernels()
+    x = z.expand(plan.counts[0], 1, 192).contiguous()
     cache = None
     for depth in range(5):
-        c = model.action_encoder(flat_actions[:, :depth + 1])[:, -3:]
+        count = plan.counts[depth]
+        ops = kernels(count != 300)
+        parent = plan.parents[depth]
+        if parent is not None:
+            # Branching: children inherit the latent history and cached keys/values of their parent.
+            x = x.index_select(0, parent)
+            if cache is not None:
+                cache = gather_cache(cache, parent)
+        prefix = flat_actions[:, :depth + 1]
+        if count != 300:
+            # All leaves below a node share its action prefix, so one representative is embedded.
+            prefix = prefix.index_select(0, plan.representatives[depth])
+        c = model.action_encoder(prefix)[:, -3:]
         if depth < 3:
             prediction, cache = prefix_step(model, x[:, -1:], c[:, -1:], depth, cache, ops)
         else:
