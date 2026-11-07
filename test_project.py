@@ -142,6 +142,16 @@ class RolloutTest(unittest.TestCase):
             optimized = O.rollout(model, z, actions, layout)
             torch.testing.assert_close(optimized, reference, rtol=1e-5, atol=1e-5)
 
+    @torch.inference_mode()
+    def test_shared_window_matches_separate_windows(self):
+        model = cpu_model()
+        gen = torch.Generator().manual_seed(2)
+        z = torch.randn(1, 1, 192, generator=gen)
+        actions = O.TreePlan('late', 'cpu').materialize(torch.randn(1, 300, 5, 10, generator=gen))
+        shared = O.rollout(model, z, actions, 'late', use_shared_window=True)
+        separate = O.rollout(model, z, actions, 'late', use_shared_window=False)
+        torch.testing.assert_close(shared, separate, rtol=1e-5, atol=1e-5)
+
 
 @unittest.skipUnless(HAS_SIMULATOR_DEPS, 'PushT simulator dependencies are not installed')
 class SimulatorTest(unittest.TestCase):

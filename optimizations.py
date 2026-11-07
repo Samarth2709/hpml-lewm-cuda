@@ -14,6 +14,8 @@ Rollout optimizations, in the order they were added:
   5. Shared-prefix tree ('late' layout): CEM candidates are rewritten so the 300 leaves share
      30/30/60/60/300 unique prefixes. Each unique transition is predicted once and its latent
      history and K/V are gathered to its children. This changes the search proposals, not the model.
+  6. Shared sliding window: at a branching window step (step 5 in 'late'), siblings share window
+     slots 0-1, so those are computed once per parent and each leaf runs only its newest token.
 """
 import time
 from functools import lru_cache
@@ -125,10 +127,19 @@ class TreePlan:
             representatives.append(first_leaf)
             materialize_index.append(first_leaf[leaf_nodes[depth]])
 
+        # first_child[d][p] = first node at depth d whose parent is node p at depth d-1.
+        first_child = []
+        for parent in parents:
+            if parent is None:
+                first_child.append(None)
+            else:
+                first_child.append(np.unique(parent, return_index=True)[1])
+
         self.parents = [index_tensor(parent, device) for parent in parents]
         self.leaf_nodes = [index_tensor(nodes, device) for nodes in leaf_nodes]
         self.representatives = [index_tensor(first, device) for first in representatives]
         self.materialize_index = [index_tensor(index, device) for index in materialize_index]
+        self.first_child = [index_tensor(first, device) for first in first_child]
 
     def materialize(self, samples):
         """Rewrite [R,300,5,10] samples so leaves that share a node at depth d share actions up to d."""
@@ -310,7 +321,60 @@ def window_step(model, x, c, ops):
     return predicted_latents(model, x)
 
 
-def rollout(model, z, actions, layout='independent'):
+def shared_window_step(model, x, c, parent, first_child, parent_ops, ops):
+    """Window step where siblings (same parent) share window slots 0-1: compute those once per parent.
+
+    Attention is causal and action embeddings are per time step, so slots 0-1 never see slot 2
+    and are identical across siblings. Each child then runs only its newest token, attending to
+    its parent's slot 0-1 keys/values plus its own. x: [P,3,D] parent windows, c: [N,3,D] child
+    action embeddings.
+    """
+    parent_mod, parent_res, parent_attend = parent_ops
+    mod, res, attend = ops
+    predictor = model.predictor
+    transformer = predictor.transformer
+    position = predictor.pos_embedding[:, :3]
+    parent_hidden = transformer.input_proj(predictor.dropout(x[:, :2] + position[:, :2]))
+    child_hidden = transformer.input_proj(predictor.dropout(x[:, 2:] + position[:, 2:]))
+    child_hidden = child_hidden.index_select(0, parent)
+    first_child_c = c.index_select(0, first_child)
+    parent_c = transformer.cond_proj(first_child_c[:, :2])
+    child_c = transformer.cond_proj(c[:, 2:])
+    layers = transformer.layers
+    for index, block in enumerate(layers):
+        attn = block.attn
+        last = index == len(layers) - 1
+        parent_terms = block.adaLN_modulation(parent_c).chunk(6, -1)
+        p_shift, p_scale, p_gate, p_shift_ff, p_scale_ff, p_gate_ff = parent_terms
+        shift, scale, gate, shift_ff, scale_ff, gate_ff = block.adaLN_modulation(child_c).chunk(6, -1)
+
+        parent_in = attn.norm(parent_mod(block.norm1(parent_hidden), p_shift, p_scale))
+        parent_q, parent_k, parent_v = attn.to_qkv(parent_in).chunk(3, -1)
+        parent_q = split_heads(attn, parent_q)
+        parent_k = split_heads(attn, parent_k)
+        parent_v = split_heads(attn, parent_v)
+        child_in = attn.norm(mod(block.norm1(child_hidden), shift, scale))
+        q, k, v = attn.to_qkv(child_in).chunk(3, -1)
+        q = split_heads(attn, q)
+        k = split_heads(attn, k)
+        v = split_heads(attn, v)
+        k = torch.cat((parent_k.index_select(0, parent), k), dim=2)
+        v = torch.cat((parent_v.index_select(0, parent), v), dim=2)
+
+        if not last:  # the last block needs the parent slots only as keys/values
+            value = short_attention(parent_q, parent_k, parent_v, True, parent_attend)
+            parent_hidden = parent_res(parent_hidden, p_gate, attn.to_out(merge_heads(value, 2)))
+            hidden = parent_mod(block.norm2(parent_hidden), p_shift_ff, p_scale_ff)
+            parent_hidden = parent_res(parent_hidden, p_gate_ff, block.mlp(hidden))
+
+        value = short_attention(q, k, v, False, attend)
+        child_hidden = res(child_hidden, gate, attn.to_out(merge_heads(value, 1)))
+        hidden = mod(block.norm2(child_hidden), shift_ff, scale_ff)
+        child_hidden = res(child_hidden, gate_ff, block.mlp(hidden))
+    return predicted_latents(model, child_hidden)
+
+
+def rollout(model, z, actions, layout='independent', use_shared_window=True):
     """Optimized rollout of 300 candidates from one start. `actions` must follow the layout's ancestry."""
     check_rollout_inputs(z, actions)
     plan = tree_plan(layout, str(z.device))
@@ -320,8 +384,10 @@ def rollout(model, z, actions, layout='independent'):
     for depth in range(5):
         count = plan.counts[depth]
         ops = kernels(count != 300)
+        parent_ops = kernels(True)
         parent = plan.parents[depth]
-        if parent is not None:
+        shared_window = use_shared_window and depth >= 3 and parent is not None
+        if parent is not None and not shared_window:
             # Branching: children inherit the latent history and cached keys/values of their parent.
             x = x.index_select(0, parent)
             if cache is not None:
@@ -333,6 +399,10 @@ def rollout(model, z, actions, layout='independent'):
         c = model.action_encoder(prefix)[:, -3:]
         if depth < 3:
             prediction, cache = prefix_step(model, x[:, -1:], c[:, -1:], depth, cache, ops)
+        elif shared_window:
+            prediction = shared_window_step(model, x[:, -3:], c, parent, plan.first_child[depth],
+                                            parent_ops, ops)
+            x = x.index_select(0, parent)
         else:
             # Positions shift from here on, so the cached keys/values would be invalid.
             prediction = window_step(model, x[:, -3:], c, ops)
