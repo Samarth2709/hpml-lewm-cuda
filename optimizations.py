@@ -16,6 +16,9 @@ Rollout optimizations, in the order they were added:
      history and K/V are gathered to its children. This changes the search proposals, not the model.
   6. Shared sliding window: at a branching window step (step 5 in 'late'), siblings share window
      slots 0-1, so those are computed once per parent and each leaf runs only its newest token.
+  7. Compiled CEM round (CUDA): sampling, the rollout, the goal cost, top-k and the mean/std
+     update of one round form a single torch.compile function. The rollout then uses plain
+     PyTorch operations (raw_ops=True) so Inductor can fuse across the whole round.
 """
 import time
 from functools import lru_cache
@@ -201,6 +204,10 @@ def dynamic_attention(q, k, v, mask):
     return explicit_attention(q, k, v, mask)
 
 
+# Plain versions, traced by an outer torch.compile of the whole CEM round.
+RAW_OPS = (modulation, residual, explicit_attention)
+
+
 @lru_cache(maxsize=2)
 def kernels(dynamic):
     """Compiled (modulation, residual, attention). Static for 300-row stages, dynamic for narrower tree stages."""
@@ -374,17 +381,22 @@ def shared_window_step(model, x, c, parent, first_child, parent_ops, ops):
     return predicted_latents(model, child_hidden)
 
 
-def rollout(model, z, actions, layout='independent', use_shared_window=True):
+def rollout(model, z, actions, layout='independent', raw_ops=False, plan=None, use_shared_window=True):
     """Optimized rollout of 300 candidates from one start. `actions` must follow the layout's ancestry."""
     check_rollout_inputs(z, actions)
-    plan = tree_plan(layout, str(z.device))
+    if plan is None:
+        plan = tree_plan(layout, str(z.device))
     flat_actions = actions.reshape(300, 5, 10)
     x = z.expand(plan.counts[0], 1, 192).contiguous()
     cache = None
     for depth in range(5):
         count = plan.counts[depth]
-        ops = kernels(count != 300)
-        parent_ops = kernels(True)
+        if raw_ops:
+            ops = RAW_OPS
+            parent_ops = RAW_OPS
+        else:
+            ops = kernels(count != 300)
+            parent_ops = kernels(True)
         parent = plan.parents[depth]
         shared_window = use_shared_window and depth >= 3 and parent is not None
         if parent is not None and not shared_window:
@@ -409,3 +421,64 @@ def rollout(model, z, actions, layout='independent', use_shared_window=True):
         if depth < 4:
             x = torch.cat((x, prediction), dim=1)
     return prediction.reshape(1, 300, 192)
+
+
+def compile_cem_round(model, layout, use_shared_window=True):
+    """One complete CEM round as a single torch.compile function with static shapes.
+
+    Inductor fuses the normalization, modulation, GELU, residual and CEM elementwise work and
+    autotunes the FP32 matrix multiplies. No CUDA graphs are used inside the compiled code.
+    """
+    device = next(model.parameters()).device
+    plan = tree_plan(layout, str(device))
+    batch_index = torch.arange(1, device=device).unsqueeze(1).expand(-1, M.ELITES)
+
+    def cem_round(z, target, mean, std, noise):
+        candidates = noise * std.unsqueeze(1) + mean.unsqueeze(1)
+        # Same as `candidates[:, 0] = mean`, written without an in-place write for the compiler.
+        candidates = torch.cat((mean.unsqueeze(1), candidates[:, 1:]), dim=1)
+        if layout != 'independent':
+            candidates = plan.materialize(candidates)
+        prediction = rollout(model, z, candidates, layout, raw_ops=True, plan=plan,
+                             use_shared_window=use_shared_window)
+        costs = (prediction - target[:, None]).square().sum(-1)
+        values, indices = torch.topk(costs, k=M.ELITES, dim=1, largest=False)
+        elites = candidates[batch_index, indices]
+        return elites.mean(dim=1), elites.std(dim=1), values
+
+    return torch.compile(cem_round, mode='max-autotune-no-cudagraphs', dynamic=False)
+
+
+class CompiledRoundPlanner:
+    """Native CEM where every round runs as one compiled function (see compile_cem_round).
+
+    The 30 rounds are still launched one by one from Python. The noise comes from the same
+    generator calls as model.solve, so the random stream is unchanged.
+    """
+
+    def __init__(self, model, layout='independent', use_shared_window=True):
+        self.model = model
+        self.layout = layout
+        self.use_shared_window = use_shared_window
+        self.compiled_round = None
+
+    @torch.inference_mode()
+    def request(self, pixels, goal, seed):
+        device = next(self.model.parameters()).device
+        if device.type != 'cuda':
+            raise ValueError('CompiledRoundPlanner requires a CUDA model')
+        if self.compiled_round is None:
+            self.compiled_round = compile_cem_round(self.model, self.layout, self.use_shared_window)
+        z = self.model.encode({'pixels': pixels.to(device)})['emb']
+        target = self.model.encode({'pixels': goal.to(device)})['emb'][:, -1]
+        generator = torch.Generator(device=device).manual_seed(int(seed))
+        mean = torch.zeros(1, M.HORIZON, M.ACTION_DIM, device=device)
+        std = torch.ones_like(mean)
+        for _ in range(M.ROUNDS):
+            noise = torch.randn(1, M.CANDIDATES, M.HORIZON, M.ACTION_DIM, generator=generator, device=device)
+            mean, std, values = self.compiled_round(z, target, mean, std, noise)
+        return {
+            'actions': mean.cpu().clone(),
+            'std': std.cpu().clone(),
+            'cost': values.mean(dim=1).cpu().clone(),
+        }

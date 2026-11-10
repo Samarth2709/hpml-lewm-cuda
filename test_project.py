@@ -141,6 +141,8 @@ class RolloutTest(unittest.TestCase):
             reference = M.baseline_rollout(model, z, actions)
             optimized = O.rollout(model, z, actions, layout)
             torch.testing.assert_close(optimized, reference, rtol=1e-5, atol=1e-5)
+            plain = O.rollout(model, z, actions, layout, raw_ops=True)
+            torch.testing.assert_close(plain, reference, rtol=1e-5, atol=1e-5)
 
     @torch.inference_mode()
     def test_shared_window_matches_separate_windows(self):
@@ -165,15 +167,33 @@ class SimulatorTest(unittest.TestCase):
         self.assertFalse(zero['success'])
 
 
+def assert_plans_close(first, second):
+    for key in first:
+        torch.testing.assert_close(first[key], second[key], rtol=1e-4, atol=1e-4)
+
+
+@lru_cache(maxsize=1)
+def cuda_model():
+    return M.load_model('cuda')
+
+
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA not available')
 class CudaTest(unittest.TestCase):
     def test_compiled_baseline_matches_eager_baseline(self):
-        model = M.load_model('cuda')
+        model = cuda_model()
         pair = M.image_pair(12)
         reference = M.request(model, *pair, 47)
         compiled = O.CompiledGraphBaseline(model).request(*pair, 47)
-        for key in reference:
-            torch.testing.assert_close(compiled[key], reference[key], rtol=1e-4, atol=1e-4)
+        assert_plans_close(compiled, reference)
+
+    def test_compiled_rounds_match_eager_search(self):
+        model = cuda_model()
+        pair = M.image_pair(12)
+        same_search = M.request(model, *pair, 47)
+        assert_plans_close(O.CompiledRoundPlanner(model, 'independent').request(*pair, 47), same_search)
+        plan = O.tree_plan('late', 'cuda')
+        tree_search = M.request(model, *pair, 47, rollout=O.rollout, plan=plan)
+        assert_plans_close(O.CompiledRoundPlanner(model, 'late').request(*pair, 47), tree_search)
 
 
 if __name__ == '__main__':

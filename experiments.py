@@ -184,13 +184,16 @@ def quality_gate(records, reference_policy, variant_policy, margin=0.075,
 #   baseline_compiled  - unchanged baseline + torch.compile + one CUDA graph per CEM round (CUDA)
 #   optimized          - optimized rollout (optimizations.rollout), same search, eager PyTorch
 #   optimized_tree     - optimized rollout on shared-prefix tree proposals ('late'), eager PyTorch
-CONFIGS = ['baseline', 'baseline_compiled', 'optimized', 'optimized_tree']
+#   optimized_compiled      - same search, each full CEM round one torch.compile function (CUDA)
+#   optimized_tree_compiled - tree search, each full CEM round one torch.compile function (CUDA)
+CONFIGS = ['baseline', 'baseline_compiled', 'optimized', 'optimized_tree',
+           'optimized_compiled', 'optimized_tree_compiled']
 CPU_CONFIGS = ['baseline', 'optimized', 'optimized_tree']
 # Same-search configurations must reproduce the baseline plan up to FP32 rounding.
-SAME_SEARCH = ['baseline_compiled', 'optimized']
+SAME_SEARCH = ['baseline_compiled', 'optimized', 'optimized_compiled']
 # Tree configurations change the proposals; they are compared with the same tree search
 # evaluated leaf by leaf (the 'independent' rollout on tree-shaped candidates).
-TREE_SEARCH = ['optimized_tree']
+TREE_SEARCH = ['optimized_tree', 'optimized_tree_compiled']
 
 PLANNERS = {}
 
@@ -205,6 +208,10 @@ def cuda_planner(model, name):
         raise ValueError(f'{name} requires --device cuda')
     if name == 'baseline_compiled':
         planner = O.CompiledGraphBaseline(model)
+    elif name == 'optimized_compiled':
+        planner = O.CompiledRoundPlanner(model, 'independent')
+    elif name == 'optimized_tree_compiled':
+        planner = O.CompiledRoundPlanner(model, 'late')
     else:
         raise ValueError(f'Unknown configuration {name!r}')
     PLANNERS[key] = planner
