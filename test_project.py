@@ -186,14 +186,21 @@ class CudaTest(unittest.TestCase):
         compiled = O.CompiledGraphBaseline(model).request(*pair, 47)
         assert_plans_close(compiled, reference)
 
-    def test_compiled_rounds_match_eager_search(self):
+    def test_whole_search_graph_matches_eager_search(self):
         model = cuda_model()
         pair = M.image_pair(12)
         same_search = M.request(model, *pair, 47)
-        assert_plans_close(O.CompiledRoundPlanner(model, 'independent').request(*pair, 47), same_search)
+        planner = O.WholeSearchCUDAGraph(model, 'independent')
+        first = planner.request(*pair, 47)
+        assert_plans_close(first, same_search)
+        second = planner.request(*pair, 47)
+        for key in first:
+            self.assertTrue(torch.equal(first[key], second[key]))
         plan = O.tree_plan('late', 'cuda')
         tree_search = M.request(model, *pair, 47, rollout=O.rollout, plan=plan)
-        assert_plans_close(O.CompiledRoundPlanner(model, 'late').request(*pair, 47), tree_search)
+        assert_plans_close(O.WholeSearchCUDAGraph(model, 'late').request(*pair, 47), tree_search)
+        no_shared = O.WholeSearchCUDAGraph(model, 'late', use_shared_window=False)
+        assert_plans_close(no_shared.request(*pair, 47), tree_search)
 
 
 if __name__ == '__main__':

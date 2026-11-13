@@ -19,6 +19,8 @@ Rollout optimizations, in the order they were added:
   7. Compiled CEM round (CUDA): sampling, the rollout, the goal cost, top-k and the mean/std
      update of one round form a single torch.compile function. The rollout then uses plain
      PyTorch operations (raw_ops=True) so Inductor can fuse across the whole round.
+  8. Whole-search CUDA graph: all 30 compiled rounds are captured in one CUDA graph, so a
+     complete search is a single graph replay.
 """
 import time
 from functools import lru_cache
@@ -449,36 +451,78 @@ def compile_cem_round(model, layout, use_shared_window=True):
     return torch.compile(cem_round, mode='max-autotune-no-cudagraphs', dynamic=False)
 
 
-class CompiledRoundPlanner:
-    """Native CEM where every round runs as one compiled function (see compile_cem_round).
+class WholeSearchCUDAGraph:
+    """Strict-FP32 CEM planner whose 30 compiled rounds are captured in a single CUDA graph.
 
-    The 30 rounds are still launched one by one from Python. The noise comes from the same
-    generator calls as model.solve, so the random stream is unchanged.
+    The noise of all rounds is drawn before each replay with the same 30 generator calls as
+    model.solve, so the random stream is bitwise the same.
     """
 
     def __init__(self, model, layout='independent', use_shared_window=True):
         self.model = model
         self.layout = layout
         self.use_shared_window = use_shared_window
-        self.compiled_round = None
+        self.graph = None
+        self.build_ms = None
+
+    def build(self, device):
+        start = time.perf_counter()
+        self.compiled_round = compile_cem_round(self.model, self.layout, self.use_shared_window)
+        # Static buffers. The graph reads and writes these addresses on every replay,
+        # so they are kept as attributes for the lifetime of the planner.
+        self.static_z = torch.zeros(1, 1, 192, device=device)
+        self.static_target = torch.zeros(1, 192, device=device)
+        self.static_noise = torch.zeros(M.ROUNDS, 1, M.CANDIDATES, M.HORIZON, M.ACTION_DIM, device=device)
+        self.initial_mean = torch.zeros(1, M.HORIZON, M.ACTION_DIM, device=device)
+        self.initial_std = torch.ones_like(self.initial_mean)
+        self.out_mean = torch.empty_like(self.initial_mean)
+        self.out_std = torch.empty_like(self.initial_std)
+        self.out_cost = torch.empty(1, device=device)
+
+        # Warm up the compiled round on a side stream (PyTorch's CUDA graph capture pattern).
+        side_stream = torch.cuda.Stream(device=device)
+        side_stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side_stream):
+            mean = self.initial_mean
+            std = self.initial_std
+            for _ in range(3):
+                mean, std, _ = self.compiled_round(self.static_z, self.static_target, mean, std,
+                                                   self.static_noise[0])
+        torch.cuda.current_stream(device).wait_stream(side_stream)
+        torch.cuda.synchronize(device)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            mean = self.initial_mean
+            std = self.initial_std
+            values = None
+            for step in range(M.ROUNDS):
+                mean, std, values = self.compiled_round(self.static_z, self.static_target, mean, std,
+                                                        self.static_noise[step])
+            self.out_mean.copy_(mean)
+            self.out_std.copy_(std)
+            self.out_cost.copy_(values.mean(dim=1))
+        torch.cuda.synchronize(device)
+        self.build_ms = (time.perf_counter() - start) * 1e3
 
     @torch.inference_mode()
     def request(self, pixels, goal, seed):
         device = next(self.model.parameters()).device
         if device.type != 'cuda':
-            raise ValueError('CompiledRoundPlanner requires a CUDA model')
-        if self.compiled_round is None:
-            self.compiled_round = compile_cem_round(self.model, self.layout, self.use_shared_window)
+            raise ValueError('WholeSearchCUDAGraph requires a CUDA model')
+        if self.graph is None:
+            self.build(device)
         z = self.model.encode({'pixels': pixels.to(device)})['emb']
         target = self.model.encode({'pixels': goal.to(device)})['emb'][:, -1]
+        self.static_z.copy_(z)
+        self.static_target.copy_(target)
         generator = torch.Generator(device=device).manual_seed(int(seed))
-        mean = torch.zeros(1, M.HORIZON, M.ACTION_DIM, device=device)
-        std = torch.ones_like(mean)
-        for _ in range(M.ROUNDS):
-            noise = torch.randn(1, M.CANDIDATES, M.HORIZON, M.ACTION_DIM, generator=generator, device=device)
-            mean, std, values = self.compiled_round(z, target, mean, std, noise)
+        for step in range(M.ROUNDS):
+            torch.randn(1, M.CANDIDATES, M.HORIZON, M.ACTION_DIM, generator=generator, device=device,
+                        out=self.static_noise[step])
+        self.graph.replay()
         return {
-            'actions': mean.cpu().clone(),
-            'std': std.cpu().clone(),
-            'cost': values.mean(dim=1).cpu().clone(),
+            'actions': self.out_mean.cpu().clone(),
+            'std': self.out_std.cpu().clone(),
+            'cost': self.out_cost.cpu().clone(),
         }
