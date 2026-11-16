@@ -187,14 +187,17 @@ def quality_gate(records, reference_policy, variant_policy, margin=0.075,
 #   optimized_cuda               - same search, compiled rounds, 30-round CUDA graph (CUDA)
 #   optimized_tree_noshared_cuda - optimized_tree_cuda without the shared sliding window (ablation)
 #   optimized_tree_cuda          - tree search, compiled rounds, 30-round CUDA graph (CUDA)
+#   *_triton                     - the same CUDA graph planner with the Triton short-attention kernel
 CONFIGS = ['baseline', 'baseline_compiled', 'optimized', 'optimized_tree',
-           'optimized_cuda', 'optimized_tree_noshared_cuda', 'optimized_tree_cuda']
+           'optimized_cuda', 'optimized_cuda_triton', 'optimized_tree_noshared_cuda',
+           'optimized_tree_cuda', 'optimized_tree_cuda_triton']
 CPU_CONFIGS = ['baseline', 'optimized', 'optimized_tree']
 # Same-search configurations must reproduce the baseline plan up to FP32 rounding.
-SAME_SEARCH = ['baseline_compiled', 'optimized', 'optimized_cuda']
+SAME_SEARCH = ['baseline_compiled', 'optimized', 'optimized_cuda', 'optimized_cuda_triton']
 # Tree configurations change the proposals; they are compared with the same tree search
 # evaluated leaf by leaf (the 'independent' rollout on tree-shaped candidates).
-TREE_SEARCH = ['optimized_tree', 'optimized_tree_noshared_cuda', 'optimized_tree_cuda']
+TREE_SEARCH = ['optimized_tree', 'optimized_tree_noshared_cuda', 'optimized_tree_cuda',
+               'optimized_tree_cuda_triton']
 
 PLANNERS = {}
 
@@ -211,10 +214,14 @@ def cuda_planner(model, name):
         planner = O.CompiledGraphBaseline(model)
     elif name == 'optimized_cuda':
         planner = O.WholeSearchCUDAGraph(model, 'independent')
+    elif name == 'optimized_cuda_triton':
+        planner = O.WholeSearchCUDAGraph(model, 'independent', use_cuda_attn=True)
     elif name == 'optimized_tree_noshared_cuda':
         planner = O.WholeSearchCUDAGraph(model, 'late', use_shared_window=False)
     elif name == 'optimized_tree_cuda':
         planner = O.WholeSearchCUDAGraph(model, 'late')
+    elif name == 'optimized_tree_cuda_triton':
+        planner = O.WholeSearchCUDAGraph(model, 'late', use_cuda_attn=True)
     else:
         raise ValueError(f'Unknown configuration {name!r}')
     PLANNERS[key] = planner

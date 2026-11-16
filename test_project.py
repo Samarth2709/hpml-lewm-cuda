@@ -202,6 +202,37 @@ class CudaTest(unittest.TestCase):
         no_shared = O.WholeSearchCUDAGraph(model, 'late', use_shared_window=False)
         assert_plans_close(no_shared.request(*pair, 47), tree_search)
 
+    @torch.inference_mode()
+    def test_triton_short_attention_matches_explicit(self):
+        gen = torch.Generator(device='cuda').manual_seed(7)
+        shapes = [(1, 1, False), (1, 2, False), (1, 3, False), (2, 2, True), (3, 3, True),
+                  (2, 2, False), (3, 3, False)]
+        for batch in (30, 60, 300):
+            for q_len, k_len, causal in shapes:
+                # Strided views, exactly as produced by the packed to_qkv projection.
+                qkv = torch.randn(batch, k_len, 3 * 16 * 64, device='cuda', generator=gen)
+                q_full, k_full, v_full = qkv.chunk(3, dim=-1)
+                q = q_full[:, :q_len].reshape(batch, q_len, 16, 64).transpose(1, 2)
+                k = k_full.reshape(batch, k_len, 16, 64).transpose(1, 2)
+                v = v_full.reshape(batch, k_len, 16, 64).transpose(1, 2)
+                mask = O.attention_mask(q_len, k_len, q.device, causal)
+                reference = O.explicit_attention(q, k, v, mask)
+                out = O.cuda_attend(q, k, v, causal)
+                torch.testing.assert_close(out, reference, rtol=1e-6, atol=1e-6)
+                self.assertTrue(out.transpose(1, 2).is_contiguous())
+
+    @torch.inference_mode()
+    def test_triton_rollout_matches_baseline(self):
+        model = cuda_model()
+        gen = torch.Generator(device='cuda').manual_seed(11)
+        z = torch.randn(1, 1, 192, device='cuda', generator=gen)
+        for layout in ('independent', 'late'):
+            samples = torch.randn(1, 300, 5, 10, device='cuda', generator=gen)
+            actions = O.TreePlan(layout, 'cuda').materialize(samples)
+            reference = M.baseline_rollout(model, z, actions)
+            out = O.rollout(model, z, actions, layout, raw_ops=True, use_cuda_attn=True)
+            torch.testing.assert_close(out, reference, rtol=1e-5, atol=1e-5)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -21,6 +21,8 @@ Rollout optimizations, in the order they were added:
      PyTorch operations (raw_ops=True) so Inductor can fuse across the whole round.
   8. Whole-search CUDA graph: all 30 compiled rounds are captured in one CUDA graph, so a
      complete search is a single graph replay.
+  9. Triton short attention (CUDA, optional): one strict-FP32 Triton kernel computes the 1-3 key
+     attention of every head and query in a single launch (use_cuda_attn=True).
 """
 import time
 from functools import lru_cache
@@ -29,6 +31,13 @@ import numpy as np
 import torch
 
 import model as M
+
+try:
+    import triton
+    import triton.language as tl
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
 
 
 class CompiledGraphBaseline:
@@ -192,6 +201,129 @@ def explicit_attention(q, k, v, mask):
     return (weights.unsqueeze(-1) * v.unsqueeze(-3)).sum(-2)
 
 
+# ---------------------------------------------------------------------------
+# Triton FP32 short attention for 1-3 keys and 64-wide heads (CUDA only).
+# It reads the strided [B, H, T, 64] Q/K/V views of the packed to_qkv output, computes exact FP32
+# dot products, a stable softmax and the weighted V sum in one launch, and writes [B, Q, H, 64]
+# so the following transpose/reshape before to_out is free.
+# ---------------------------------------------------------------------------
+
+if HAS_TRITON:
+    @triton.jit
+    def short_attention_kernel(
+        out_ptr, q_ptr, k_ptr, v_ptr,
+        sq_b, sq_h, sq_t,
+        sk_b, sk_h, sk_t,
+        sv_b, sv_h, sv_t,
+        H,
+        Q: tl.constexpr,
+        K: tl.constexpr,
+        CAUSAL: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        qi = pid % Q
+        tmp = pid // Q
+        h = tmp % H
+        b = tmp // H
+
+        d = tl.arange(0, BLOCK_D)
+        q_off = b * sq_b + h * sq_h + qi * sq_t + d
+        q_vec = tl.load(q_ptr + q_off).to(tl.float32)
+
+        kb_base = b * sk_b + h * sk_h + d
+        vb_base = b * sv_b + h * sv_h + d
+        scale = 0.125  # 64 ** -0.5
+
+        if K == 1:
+            out_vec = tl.load(v_ptr + vb_base).to(tl.float32)
+        elif K == 2:
+            k0 = tl.load(k_ptr + kb_base).to(tl.float32)
+            k1 = tl.load(k_ptr + kb_base + sk_t).to(tl.float32)
+            s0 = tl.sum(q_vec * k0, axis=0) * scale
+            s1 = tl.sum(q_vec * k1, axis=0) * scale
+            if CAUSAL:
+                mask1 = qi >= 1
+                m = tl.where(mask1, tl.maximum(s0, s1), s0)
+                e0 = tl.exp(s0 - m)
+                e1 = tl.where(mask1, tl.exp(tl.where(mask1, s1, m) - m), 0.0)
+            else:
+                m = tl.maximum(s0, s1)
+                e0 = tl.exp(s0 - m)
+                e1 = tl.exp(s1 - m)
+            inv = 1.0 / (e0 + e1)
+            v0 = tl.load(v_ptr + vb_base).to(tl.float32)
+            v1 = tl.load(v_ptr + vb_base + sv_t).to(tl.float32)
+            out_vec = (e0 * inv) * v0 + (e1 * inv) * v1
+        else:  # K == 3
+            k0 = tl.load(k_ptr + kb_base).to(tl.float32)
+            k1 = tl.load(k_ptr + kb_base + sk_t).to(tl.float32)
+            k2 = tl.load(k_ptr + kb_base + 2 * sk_t).to(tl.float32)
+            s0 = tl.sum(q_vec * k0, axis=0) * scale
+            s1 = tl.sum(q_vec * k1, axis=0) * scale
+            s2 = tl.sum(q_vec * k2, axis=0) * scale
+            if CAUSAL:
+                mask1 = qi >= 1
+                mask2 = qi >= 2
+                m01 = tl.where(mask1, tl.maximum(s0, s1), s0)
+                m = tl.where(mask2, tl.maximum(m01, s2), m01)
+                e0 = tl.exp(s0 - m)
+                e1 = tl.where(mask1, tl.exp(tl.where(mask1, s1, m) - m), 0.0)
+                e2 = tl.where(mask2, tl.exp(tl.where(mask2, s2, m) - m), 0.0)
+            else:
+                m = tl.maximum(tl.maximum(s0, s1), s2)
+                e0 = tl.exp(s0 - m)
+                e1 = tl.exp(s1 - m)
+                e2 = tl.exp(s2 - m)
+            inv = 1.0 / (e0 + e1 + e2)
+            v0 = tl.load(v_ptr + vb_base).to(tl.float32)
+            v1 = tl.load(v_ptr + vb_base + sv_t).to(tl.float32)
+            v2 = tl.load(v_ptr + vb_base + 2 * sv_t).to(tl.float32)
+            out_vec = (e0 * inv) * v0 + (e1 * inv) * v1 + (e2 * inv) * v2
+
+        out_off = ((b * Q + qi) * H + h) * BLOCK_D + d
+        tl.store(out_ptr + out_off, out_vec)
+
+
+@torch.library.custom_op('lewm::short_attention', mutates_args=())
+def triton_short_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool) -> torch.Tensor:
+    if not HAS_TRITON:
+        raise RuntimeError('Triton is required for lewm::short_attention on CUDA')
+    for tensor in (q, k, v):
+        if tensor.dtype != torch.float32 or tensor.shape[-1] != 64 or tensor.stride(-1) != 1:
+            raise ValueError('Requires FP32 tensors with contiguous 64-wide heads')
+    batch, heads, q_len, _ = q.shape
+    k_len = k.shape[-2]
+    if k.shape != v.shape or q.shape[:2] != k.shape[:2] or not 1 <= q_len <= k_len <= 3:
+        raise ValueError(f'Unsupported short attention shapes: q={tuple(q.shape)}, k={tuple(k.shape)}')
+    output = torch.empty((batch, q_len, heads, 64), device=q.device, dtype=torch.float32)
+    grid = (batch * heads * q_len,)
+    short_attention_kernel[grid](
+        output, q, k, v,
+        q.stride(0), q.stride(1), q.stride(2),
+        k.stride(0), k.stride(1), k.stride(2),
+        v.stride(0), v.stride(1), v.stride(2),
+        heads,
+        Q=q_len,
+        K=k_len,
+        CAUSAL=causal,
+        BLOCK_D=64,
+        num_warps=2,
+    )
+    return output
+
+
+@triton_short_attention.register_fake
+def triton_short_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool) -> torch.Tensor:
+    batch, heads, q_len, _ = q.shape
+    return torch.empty((batch, q_len, heads, 64), device=q.device, dtype=torch.float32)
+
+
+def cuda_attend(q, k, v, causal):
+    """q, k, v: [B, H, T, 64] FP32 CUDA views with T <= 3. Returns a [B, H, Q, 64] view."""
+    return triton_short_attention(q, k, v, causal).transpose(1, 2)
+
+
 # Separate code objects for the dynamic-shape kernels: torch.compile caches (and its recompile
 # limit) are per code object, so sharing them with the static kernels would exhaust the limit.
 def dynamic_modulation(x, shift, scale):
@@ -231,7 +363,9 @@ def attention_mask(queries, keys, device, causal):
     return mask
 
 
-def short_attention(q, k, v, causal, attend):
+def short_attention(q, k, v, causal, attend, use_cuda_attn=False):
+    if use_cuda_attn and q.device.type == 'cuda':
+        return cuda_attend(q, k, v, causal)
     mask = attention_mask(q.shape[2], k.shape[2], q.device, causal)
     return attend(q, k, v, mask)
 
@@ -255,7 +389,7 @@ def predicted_latents(model, hidden):
     return model.pred_proj(flat).reshape(rows, 1, -1)
 
 
-def prefix_step(model, x, c, position, cache, ops):
+def prefix_step(model, x, c, position, cache, ops, use_cuda_attn=False):
     """Predict from one new token at prefix position 0/1/2 and append its K/V to the per-layer cache."""
     mod, res, attend = ops
     predictor = model.predictor
@@ -278,7 +412,7 @@ def prefix_step(model, x, c, position, cache, ops):
             k = torch.cat((old_k, k), dim=2)
             v = torch.cat((old_v, v), dim=2)
         # The newest token may attend to every earlier token (non-causal, one query).
-        value = short_attention(q, k, v, False, attend)
+        value = short_attention(q, k, v, False, attend, use_cuda_attn)
         x = res(x, gate, attn.to_out(merge_heads(value, 1)))
         hidden = mod(block.norm2(x), shift_ff, scale_ff)
         x = res(x, gate_ff, block.mlp(hidden))
@@ -289,17 +423,17 @@ def prefix_step(model, x, c, position, cache, ops):
     return prediction, cache
 
 
-def window_attention(attn, x, attend):
+def window_attention(attn, x, attend, use_cuda_attn=False):
     """Causal self-attention over a full 1-3 position window, including both projections."""
     q, k, v = attn.to_qkv(attn.norm(x)).chunk(3, -1)
     q = split_heads(attn, q)
     k = split_heads(attn, k)
     v = split_heads(attn, v)
-    value = short_attention(q, k, v, True, attend)
+    value = short_attention(q, k, v, True, attend, use_cuda_attn)
     return attn.to_out(merge_heads(value, x.shape[1]))
 
 
-def window_step(model, x, c, ops):
+def window_step(model, x, c, ops, use_cuda_attn=False):
     """Predict from a shifted 3-position window. The last block computes only the newest row."""
     mod, res, attend = ops
     predictor = model.predictor
@@ -310,7 +444,7 @@ def window_step(model, x, c, ops):
     for block in transformer.layers[:-1]:
         shift, scale, gate, shift_ff, scale_ff, gate_ff = block.adaLN_modulation(c).chunk(6, -1)
         hidden = mod(block.norm1(x), shift, scale)
-        x = res(x, gate, window_attention(block.attn, hidden, attend))
+        x = res(x, gate, window_attention(block.attn, hidden, attend, use_cuda_attn))
         hidden = mod(block.norm2(x), shift_ff, scale_ff)
         x = res(x, gate_ff, block.mlp(hidden))
 
@@ -323,14 +457,14 @@ def window_step(model, x, c, ops):
     q = split_heads(attn, q[:, -1:])
     k = split_heads(attn, k)
     v = split_heads(attn, v)
-    value = short_attention(q, k, v, False, attend)
+    value = short_attention(q, k, v, False, attend, use_cuda_attn)
     x = res(x[:, -1:], gate[:, -1:], attn.to_out(merge_heads(value, 1)))
     hidden = mod(block.norm2(x), shift_ff[:, -1:], scale_ff[:, -1:])
     x = res(x, gate_ff[:, -1:], block.mlp(hidden))
     return predicted_latents(model, x)
 
 
-def shared_window_step(model, x, c, parent, first_child, parent_ops, ops):
+def shared_window_step(model, x, c, parent, first_child, parent_ops, ops, use_cuda_attn=False):
     """Window step where siblings (same parent) share window slots 0-1: compute those once per parent.
 
     Attention is causal and action embeddings are per time step, so slots 0-1 never see slot 2
@@ -371,19 +505,20 @@ def shared_window_step(model, x, c, parent, first_child, parent_ops, ops):
         v = torch.cat((parent_v.index_select(0, parent), v), dim=2)
 
         if not last:  # the last block needs the parent slots only as keys/values
-            value = short_attention(parent_q, parent_k, parent_v, True, parent_attend)
+            value = short_attention(parent_q, parent_k, parent_v, True, parent_attend, use_cuda_attn)
             parent_hidden = parent_res(parent_hidden, p_gate, attn.to_out(merge_heads(value, 2)))
             hidden = parent_mod(block.norm2(parent_hidden), p_shift_ff, p_scale_ff)
             parent_hidden = parent_res(parent_hidden, p_gate_ff, block.mlp(hidden))
 
-        value = short_attention(q, k, v, False, attend)
+        value = short_attention(q, k, v, False, attend, use_cuda_attn)
         child_hidden = res(child_hidden, gate, attn.to_out(merge_heads(value, 1)))
         hidden = mod(block.norm2(child_hidden), shift_ff, scale_ff)
         child_hidden = res(child_hidden, gate_ff, block.mlp(hidden))
     return predicted_latents(model, child_hidden)
 
 
-def rollout(model, z, actions, layout='independent', raw_ops=False, plan=None, use_shared_window=True):
+def rollout(model, z, actions, layout='independent', raw_ops=False, use_cuda_attn=False, plan=None,
+            use_shared_window=True):
     """Optimized rollout of 300 candidates from one start. `actions` must follow the layout's ancestry."""
     check_rollout_inputs(z, actions)
     if plan is None:
@@ -412,20 +547,20 @@ def rollout(model, z, actions, layout='independent', raw_ops=False, plan=None, u
             prefix = prefix.index_select(0, plan.representatives[depth])
         c = model.action_encoder(prefix)[:, -3:]
         if depth < 3:
-            prediction, cache = prefix_step(model, x[:, -1:], c[:, -1:], depth, cache, ops)
+            prediction, cache = prefix_step(model, x[:, -1:], c[:, -1:], depth, cache, ops, use_cuda_attn)
         elif shared_window:
             prediction = shared_window_step(model, x[:, -3:], c, parent, plan.first_child[depth],
-                                            parent_ops, ops)
+                                            parent_ops, ops, use_cuda_attn)
             x = x.index_select(0, parent)
         else:
             # Positions shift from here on, so the cached keys/values would be invalid.
-            prediction = window_step(model, x[:, -3:], c, ops)
+            prediction = window_step(model, x[:, -3:], c, ops, use_cuda_attn)
         if depth < 4:
             x = torch.cat((x, prediction), dim=1)
     return prediction.reshape(1, 300, 192)
 
 
-def compile_cem_round(model, layout, use_shared_window=True):
+def compile_cem_round(model, layout, use_cuda_attn=False, use_shared_window=True):
     """One complete CEM round as a single torch.compile function with static shapes.
 
     Inductor fuses the normalization, modulation, GELU, residual and CEM elementwise work and
@@ -441,8 +576,8 @@ def compile_cem_round(model, layout, use_shared_window=True):
         candidates = torch.cat((mean.unsqueeze(1), candidates[:, 1:]), dim=1)
         if layout != 'independent':
             candidates = plan.materialize(candidates)
-        prediction = rollout(model, z, candidates, layout, raw_ops=True, plan=plan,
-                             use_shared_window=use_shared_window)
+        prediction = rollout(model, z, candidates, layout, raw_ops=True, use_cuda_attn=use_cuda_attn,
+                             plan=plan, use_shared_window=use_shared_window)
         costs = (prediction - target[:, None]).square().sum(-1)
         values, indices = torch.topk(costs, k=M.ELITES, dim=1, largest=False)
         elites = candidates[batch_index, indices]
@@ -458,16 +593,18 @@ class WholeSearchCUDAGraph:
     model.solve, so the random stream is bitwise the same.
     """
 
-    def __init__(self, model, layout='independent', use_shared_window=True):
+    def __init__(self, model, layout='independent', use_cuda_attn=False, use_shared_window=True):
         self.model = model
         self.layout = layout
+        self.use_cuda_attn = use_cuda_attn
         self.use_shared_window = use_shared_window
         self.graph = None
         self.build_ms = None
 
     def build(self, device):
         start = time.perf_counter()
-        self.compiled_round = compile_cem_round(self.model, self.layout, self.use_shared_window)
+        self.compiled_round = compile_cem_round(self.model, self.layout, self.use_cuda_attn,
+                                                self.use_shared_window)
         # Static buffers. The graph reads and writes these addresses on every replay,
         # so they are kept as attributes for the lifetime of the planner.
         self.static_z = torch.zeros(1, 1, 192, device=device)
