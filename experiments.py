@@ -198,30 +198,35 @@ SAME_SEARCH = ['baseline_compiled', 'optimized', 'optimized_cuda', 'optimized_cu
 # evaluated leaf by leaf (the 'independent' rollout on tree-shaped candidates).
 TREE_SEARCH = ['optimized_tree', 'optimized_tree_noshared_cuda', 'optimized_tree_cuda',
                'optimized_tree_cuda_triton']
+# Whole-search CUDA graph planners can serve R requests together (multi-request batching).
+GRAPH_CONFIGS = ['optimized_cuda', 'optimized_cuda_triton', 'optimized_tree_noshared_cuda',
+                 'optimized_tree_cuda', 'optimized_tree_cuda_triton']
 
 PLANNERS = {}
 
 
-def cuda_planner(model, name):
+def cuda_planner(model, name, batch_size=1):
     """Build each CUDA planner once and reuse it; compilation and capture are cold-start cost."""
-    key = (id(model), name)
+    key = (id(model), name, batch_size)
     if key in PLANNERS:
         return PLANNERS[key]
     device = str(next(model.parameters()).device)
     if not device.startswith('cuda'):
         raise ValueError(f'{name} requires --device cuda')
     if name == 'baseline_compiled':
+        if batch_size != 1:
+            raise ValueError('baseline_compiled serves one request at a time')
         planner = O.CompiledGraphBaseline(model)
     elif name == 'optimized_cuda':
-        planner = O.WholeSearchCUDAGraph(model, 'independent')
+        planner = O.WholeSearchCUDAGraph(model, 'independent', batch_size=batch_size)
     elif name == 'optimized_cuda_triton':
-        planner = O.WholeSearchCUDAGraph(model, 'independent', use_cuda_attn=True)
+        planner = O.WholeSearchCUDAGraph(model, 'independent', use_cuda_attn=True, batch_size=batch_size)
     elif name == 'optimized_tree_noshared_cuda':
-        planner = O.WholeSearchCUDAGraph(model, 'late', use_shared_window=False)
+        planner = O.WholeSearchCUDAGraph(model, 'late', batch_size=batch_size, use_shared_window=False)
     elif name == 'optimized_tree_cuda':
-        planner = O.WholeSearchCUDAGraph(model, 'late')
+        planner = O.WholeSearchCUDAGraph(model, 'late', batch_size=batch_size)
     elif name == 'optimized_tree_cuda_triton':
-        planner = O.WholeSearchCUDAGraph(model, 'late', use_cuda_attn=True)
+        planner = O.WholeSearchCUDAGraph(model, 'late', use_cuda_attn=True, batch_size=batch_size)
     else:
         raise ValueError(f'Unknown configuration {name!r}')
     PLANNERS[key] = planner
@@ -365,6 +370,55 @@ def print_scene_table(scene, args, configs, summary, speedups_vs_baseline, speed
               f"| {stats['iqr_ms']:.1f} | {versus_baseline} | {versus_compiled} |")
 
 
+def measure_batch_sweep(model, args, configs):
+    """Throughput of R requests served together by one CUDA graph planner.
+
+    Request i of a batch uses development scene (scene + i) mod 24 and seed (seed + i).
+    """
+    graph_configs = [name for name in configs if name in GRAPH_CONFIGS]
+    if not args.device.startswith('cuda') or not graph_configs:
+        return {'skipped': True, 'reason': 'Requires CUDA and at least one whole-search CUDA graph config'}
+    scene = args.scenes[0]
+    results = {}
+    for name in graph_configs:
+        results[name] = {}
+        for batch_size in args.batch_sizes:
+            pairs = [M.image_pair((scene + index) % 24) for index in range(batch_size)]
+            pixels = torch.cat([pair[0] for pair in pairs], dim=0)
+            goals = torch.cat([pair[1] for pair in pairs], dim=0)
+            seeds = [args.seed + index for index in range(batch_size)]
+            planner = cuda_planner(model, name, batch_size)
+
+            sync(args.device)
+            start = time.perf_counter()
+            output = planner.request(pixels, goals, seeds)
+            sync(args.device)
+            cold_ms = (time.perf_counter() - start) * 1e3
+            # The batched plan of request 0 must match the single-request plan.
+            single = run(model, pairs[0], seeds[0], name)
+            difference = float((output['actions'][0:1] - single['actions']).abs().max())
+
+            for _ in range(args.warmups):
+                planner.request(pixels, goals, seeds)
+            samples = []
+            for _ in range(args.batch_repeats):
+                sync(args.device)
+                start = time.perf_counter_ns()
+                planner.request(pixels, goals, seeds)
+                sync(args.device)
+                samples.append((time.perf_counter_ns() - start) / 1e6)
+            stats = summarize_timings(samples, resamples=args.bootstrap_resamples)
+            stats['cold_start_ms'] = cold_ms
+            stats['throughput_req_s'] = batch_size / (stats['median_ms'] / 1e3)
+            stats['ms_per_request'] = stats['median_ms'] / batch_size
+            stats['req0_max_abs_diff'] = difference
+            results[name][str(batch_size)] = stats
+            print(f"[batch] {name} R={batch_size}: median={stats['median_ms']:.1f} ms "
+                  f"({stats['ms_per_request']:.1f} ms/req, {stats['throughput_req_s']:.2f} req/s, "
+                  f"diff={difference:.2e})")
+    return results
+
+
 def benchmark(args):
     configs = args.configs
     if configs is None and args.device.startswith('cuda'):
@@ -439,6 +493,12 @@ def benchmark(args):
         rounded = {name: round(value, 1) for name, value in cold_start_ms.items()}
         print('Cold start (ms):', rounded)
         print('Checks:', json.dumps(checks))
+        save_report(report, args.output)
+
+    if args.batch_sizes:
+        print('\nRunning multi-request throughput sweep...')
+        batch_configs = args.batch_configs or configs
+        report['batch_sweep'] = measure_batch_sweep(model, args, batch_configs)
         save_report(report, args.output)
 
     if args.device.startswith('cuda'):
@@ -616,6 +676,11 @@ def main():
     bench.add_argument('--repeats', type=int, default=30)
     bench.add_argument('--warmups', type=int, default=3)
     bench.add_argument('--bootstrap-resamples', type=int, default=10000)
+    bench.add_argument('--batch-sizes', type=int, nargs='+', default=None,
+                       help='Optional multi-request throughput sweep, for example 1 2 4 8.')
+    bench.add_argument('--batch-configs', nargs='+', choices=GRAPH_CONFIGS, default=None,
+                       help='Configurations for the sweep (default: the CUDA graph configs being benchmarked).')
+    bench.add_argument('--batch-repeats', type=int, default=20)
     bench.add_argument('--output', type=Path)
 
     quality = commands.add_parser('evaluate', help='Closed-loop PushT task quality of each planner.')

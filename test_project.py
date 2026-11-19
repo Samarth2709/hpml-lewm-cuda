@@ -128,6 +128,15 @@ class TreePlanTest(unittest.TestCase):
         independent = O.TreePlan('independent', 'cpu').materialize(samples)
         self.assertTrue(torch.equal(independent, samples))
 
+    def test_batched_roots_repeat_the_single_root_plan(self):
+        samples = torch.randn(2, 300, 5, 10, generator=torch.Generator().manual_seed(3))
+        single = O.TreePlan('late', 'cpu')
+        batched = O.TreePlan('late', 'cpu', batch_size=2)
+        self.assertEqual(batched.counts, (60, 60, 120, 120, 600))
+        both = batched.materialize(samples)
+        for root in range(2):
+            self.assertTrue(torch.equal(both[root:root + 1], single.materialize(samples[root:root + 1])))
+
 
 class RolloutTest(unittest.TestCase):
     @torch.inference_mode()
@@ -143,6 +152,18 @@ class RolloutTest(unittest.TestCase):
             torch.testing.assert_close(optimized, reference, rtol=1e-5, atol=1e-5)
             plain = O.rollout(model, z, actions, layout, raw_ops=True)
             torch.testing.assert_close(plain, reference, rtol=1e-5, atol=1e-5)
+
+    @torch.inference_mode()
+    def test_batched_roots_match_baseline(self):
+        model = cpu_model()
+        gen = torch.Generator().manual_seed(1)
+        z = torch.randn(2, 1, 192, generator=gen)
+        for layout in ('independent', 'late'):
+            samples = torch.randn(2, 300, 5, 10, generator=gen)
+            actions = O.TreePlan(layout, 'cpu', batch_size=2).materialize(samples)
+            reference = M.baseline_rollout(model, z, actions)
+            optimized = O.rollout(model, z, actions, layout, raw_ops=True)
+            torch.testing.assert_close(optimized, reference, rtol=1e-5, atol=1e-5)
 
     @torch.inference_mode()
     def test_shared_window_matches_separate_windows(self):
@@ -201,6 +222,19 @@ class CudaTest(unittest.TestCase):
         assert_plans_close(O.WholeSearchCUDAGraph(model, 'late').request(*pair, 47), tree_search)
         no_shared = O.WholeSearchCUDAGraph(model, 'late', use_shared_window=False)
         assert_plans_close(no_shared.request(*pair, 47), tree_search)
+
+    def test_batched_graph_matches_single_requests(self):
+        model = cuda_model()
+        pairs = [M.image_pair(12), M.image_pair(13)]
+        pixels = torch.cat([pairs[0][0], pairs[1][0]], dim=0)
+        goals = torch.cat([pairs[0][1], pairs[1][1]], dim=0)
+        for layout in ('independent', 'late'):
+            batched = O.WholeSearchCUDAGraph(model, layout, batch_size=2).request(pixels, goals, [47, 48])
+            single = O.WholeSearchCUDAGraph(model, layout)
+            for index in range(2):
+                one = single.request(*pairs[index], 47 + index)
+                for key in one:
+                    torch.testing.assert_close(batched[key][index:index + 1], one[key], rtol=1e-4, atol=1e-4)
 
     @torch.inference_mode()
     def test_triton_short_attention_matches_explicit(self):

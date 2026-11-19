@@ -23,6 +23,8 @@ Rollout optimizations, in the order they were added:
      complete search is a single graph replay.
   9. Triton short attention (CUDA, optional): one strict-FP32 Triton kernel computes the 1-3 key
      attention of every head and query in a single launch (use_cuda_attn=True).
+ 10. Multi-request batching: R independent planning requests (R roots of 300 leaves each) share
+     one rollout and one CUDA graph (batch_size=R).
 """
 import time
 from functools import lru_cache
@@ -104,13 +106,28 @@ def index_tensor(array, device):
     return torch.tensor(array, dtype=torch.int64, device=device)
 
 
-class TreePlan:
-    """Static shared-prefix layout: the parent of every tree node and the node behind every leaf."""
+def tile(array, stride, copies):
+    """Repeat a single-root index array for `copies` roots, offset by `stride` for each root."""
+    if array is None or copies == 1:
+        return array
+    parts = []
+    for root in range(copies):
+        parts.append(array + root * stride)
+    return np.concatenate(parts)
 
-    def __init__(self, layout, device):
+
+class TreePlan:
+    """Static shared-prefix layout: the parent of every tree node and the node behind every leaf.
+
+    Supports R >= 1 independent planning roots (batch_size=R), each with 300 leaves.
+    """
+
+    def __init__(self, layout, device, batch_size=1):
         counts = LAYOUTS[layout]
         self.layout = layout
-        self.counts = counts
+        self.batch_size = batch_size
+        self.single_counts = counts
+        self.counts = tuple(batch_size * count for count in counts)
 
         # parents[d][i] = node at depth d-1 that node i at depth d continues (None: no branching).
         parents = [None]
@@ -149,11 +166,24 @@ class TreePlan:
             else:
                 first_child.append(np.unique(parent, return_index=True)[1])
 
-        self.parents = [index_tensor(parent, device) for parent in parents]
-        self.leaf_nodes = [index_tensor(nodes, device) for nodes in leaf_nodes]
-        self.representatives = [index_tensor(first, device) for first in representatives]
-        self.materialize_index = [index_tensor(index, device) for index in materialize_index]
-        self.first_child = [index_tensor(first, device) for first in first_child]
+        # Batched roots: node and leaf numbers of root r are offset by r times the per-root count.
+        self.parents = [None]
+        self.first_child = [None]
+        for depth in range(1, 5):
+            tiled_parents = tile(parents[depth], counts[depth - 1], batch_size)
+            tiled_first_child = tile(first_child[depth], counts[depth], batch_size)
+            self.parents.append(index_tensor(tiled_parents, device))
+            self.first_child.append(index_tensor(tiled_first_child, device))
+        self.leaf_nodes = []
+        self.representatives = []
+        self.materialize_index = []
+        for depth in range(5):
+            tiled_leaf_nodes = tile(leaf_nodes[depth], counts[depth], batch_size)
+            tiled_representatives = tile(representatives[depth], 300, batch_size)
+            self.leaf_nodes.append(index_tensor(tiled_leaf_nodes, device))
+            self.representatives.append(index_tensor(tiled_representatives, device))
+            # materialize() gathers within each root, so this index is not offset.
+            self.materialize_index.append(index_tensor(materialize_index[depth], device))
 
     def materialize(self, samples):
         """Rewrite [R,300,5,10] samples so leaves that share a node at depth d share actions up to d."""
@@ -165,8 +195,8 @@ class TreePlan:
 
 
 @lru_cache(maxsize=16)
-def tree_plan(layout, device):
-    return TreePlan(layout, device)
+def tree_plan(layout, device, batch_size=1):
+    return TreePlan(layout, device, batch_size)
 
 
 def gather_cache(cache, index):
@@ -179,10 +209,10 @@ def gather_cache(cache, index):
 def check_rollout_inputs(z, actions):
     if torch.is_grad_enabled():
         raise ValueError('The optimized rollout runs in inference mode only')
-    if z.ndim != 3 or z.shape[1:] != (1, 192) or z.shape[0] != 1:
-        raise ValueError(f'Expected z of shape [1,1,192], got {tuple(z.shape)}')
-    if actions.ndim != 4 or actions.shape != (1, 300, 5, 10):
-        raise ValueError(f'Expected actions of shape [1,300,5,10], got {tuple(actions.shape)}')
+    if z.ndim != 3 or z.shape[1:] != (1, 192):
+        raise ValueError(f'Expected z of shape [R,1,192], got {tuple(z.shape)}')
+    if actions.ndim != 4 or actions.shape[1:] != (300, 5, 10) or actions.shape[0] != z.shape[0]:
+        raise ValueError(f'Expected actions of shape [R,300,5,10], got {tuple(actions.shape)}')
 
 
 def modulation(x, shift, scale):
@@ -519,20 +549,22 @@ def shared_window_step(model, x, c, parent, first_child, parent_ops, ops, use_cu
 
 def rollout(model, z, actions, layout='independent', raw_ops=False, use_cuda_attn=False, plan=None,
             use_shared_window=True):
-    """Optimized rollout of 300 candidates from one start. `actions` must follow the layout's ancestry."""
+    """Optimized rollout for R >= 1 roots of 300 candidates. `actions` must follow the layout's ancestry."""
     check_rollout_inputs(z, actions)
+    roots = z.shape[0]
     if plan is None:
-        plan = tree_plan(layout, str(z.device))
-    flat_actions = actions.reshape(300, 5, 10)
-    x = z.expand(plan.counts[0], 1, 192).contiguous()
+        plan = tree_plan(layout, str(z.device), roots)
+    flat_actions = actions.reshape(roots * 300, 5, 10)
+    x = z[:, None].expand(roots, plan.single_counts[0], 1, 192)
+    x = x.reshape(plan.counts[0], 1, 192).contiguous()
     cache = None
     for depth in range(5):
-        count = plan.counts[depth]
+        single_count = plan.single_counts[depth]
         if raw_ops:
             ops = RAW_OPS
             parent_ops = RAW_OPS
         else:
-            ops = kernels(count != 300)
+            ops = kernels(single_count != 300)
             parent_ops = kernels(True)
         parent = plan.parents[depth]
         shared_window = use_shared_window and depth >= 3 and parent is not None
@@ -542,7 +574,7 @@ def rollout(model, z, actions, layout='independent', raw_ops=False, use_cuda_att
             if cache is not None:
                 cache = gather_cache(cache, parent)
         prefix = flat_actions[:, :depth + 1]
-        if count != 300:
+        if single_count != 300:
             # All leaves below a node share its action prefix, so one representative is embedded.
             prefix = prefix.index_select(0, plan.representatives[depth])
         c = model.action_encoder(prefix)[:, -3:]
@@ -557,18 +589,18 @@ def rollout(model, z, actions, layout='independent', raw_ops=False, use_cuda_att
             prediction = window_step(model, x[:, -3:], c, ops, use_cuda_attn)
         if depth < 4:
             x = torch.cat((x, prediction), dim=1)
-    return prediction.reshape(1, 300, 192)
+    return prediction.reshape(roots, 300, 192)
 
 
-def compile_cem_round(model, layout, use_cuda_attn=False, use_shared_window=True):
+def compile_cem_round(model, layout, use_cuda_attn=False, use_shared_window=True, batch_size=1):
     """One complete CEM round as a single torch.compile function with static shapes.
 
     Inductor fuses the normalization, modulation, GELU, residual and CEM elementwise work and
     autotunes the FP32 matrix multiplies. No CUDA graphs are used inside the compiled code.
     """
     device = next(model.parameters()).device
-    plan = tree_plan(layout, str(device))
-    batch_index = torch.arange(1, device=device).unsqueeze(1).expand(-1, M.ELITES)
+    plan = tree_plan(layout, str(device), batch_size)
+    batch_index = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, M.ELITES)
 
     def cem_round(z, target, mean, std, noise):
         candidates = noise * std.unsqueeze(1) + mean.unsqueeze(1)
@@ -590,31 +622,33 @@ class WholeSearchCUDAGraph:
     """Strict-FP32 CEM planner whose 30 compiled rounds are captured in a single CUDA graph.
 
     The noise of all rounds is drawn before each replay with the same 30 generator calls as
-    model.solve, so the random stream is bitwise the same.
+    model.solve, so the random stream is bitwise the same. batch_size=R serves R requests at once.
     """
 
-    def __init__(self, model, layout='independent', use_cuda_attn=False, use_shared_window=True):
+    def __init__(self, model, layout='independent', use_cuda_attn=False, batch_size=1, use_shared_window=True):
         self.model = model
         self.layout = layout
         self.use_cuda_attn = use_cuda_attn
+        self.batch_size = batch_size
         self.use_shared_window = use_shared_window
         self.graph = None
         self.build_ms = None
 
     def build(self, device):
         start = time.perf_counter()
+        roots = self.batch_size
         self.compiled_round = compile_cem_round(self.model, self.layout, self.use_cuda_attn,
-                                                self.use_shared_window)
+                                                self.use_shared_window, roots)
         # Static buffers. The graph reads and writes these addresses on every replay,
         # so they are kept as attributes for the lifetime of the planner.
-        self.static_z = torch.zeros(1, 1, 192, device=device)
-        self.static_target = torch.zeros(1, 192, device=device)
-        self.static_noise = torch.zeros(M.ROUNDS, 1, M.CANDIDATES, M.HORIZON, M.ACTION_DIM, device=device)
-        self.initial_mean = torch.zeros(1, M.HORIZON, M.ACTION_DIM, device=device)
+        self.static_z = torch.zeros(roots, 1, 192, device=device)
+        self.static_target = torch.zeros(roots, 192, device=device)
+        self.static_noise = torch.zeros(M.ROUNDS, roots, M.CANDIDATES, M.HORIZON, M.ACTION_DIM, device=device)
+        self.initial_mean = torch.zeros(roots, M.HORIZON, M.ACTION_DIM, device=device)
         self.initial_std = torch.ones_like(self.initial_mean)
         self.out_mean = torch.empty_like(self.initial_mean)
         self.out_std = torch.empty_like(self.initial_std)
-        self.out_cost = torch.empty(1, device=device)
+        self.out_cost = torch.empty(roots, device=device)
 
         # Warm up the compiled round on a side stream (PyTorch's CUDA graph capture pattern).
         side_stream = torch.cuda.Stream(device=device)
@@ -642,8 +676,32 @@ class WholeSearchCUDAGraph:
         torch.cuda.synchronize(device)
         self.build_ms = (time.perf_counter() - start) * 1e3
 
+    def fill_noise(self, seed, device):
+        """Draw the noise of all rounds with the generator calls model.solve would make."""
+        if self.batch_size == 1:
+            if isinstance(seed, (list, tuple)):
+                seed = seed[0]
+            generator = torch.Generator(device=device).manual_seed(int(seed))
+            for step in range(M.ROUNDS):
+                torch.randn(1, M.CANDIDATES, M.HORIZON, M.ACTION_DIM, generator=generator, device=device,
+                            out=self.static_noise[step])
+            return
+        # One generator per request: an int seed means seeds seed, seed+1, ..., seed+R-1.
+        if isinstance(seed, int):
+            seeds = [seed + index for index in range(self.batch_size)]
+        else:
+            seeds = [int(value) for value in seed]
+        generators = []
+        for value in seeds:
+            generators.append(torch.Generator(device=device).manual_seed(value))
+        for step in range(M.ROUNDS):
+            for index, generator in enumerate(generators):
+                torch.randn(M.CANDIDATES, M.HORIZON, M.ACTION_DIM, generator=generator, device=device,
+                            out=self.static_noise[step, index])
+
     @torch.inference_mode()
     def request(self, pixels, goal, seed):
+        """Plan R = batch_size requests: pixels/goal [R,1,3,224,224], seed an int or R ints."""
         device = next(self.model.parameters()).device
         if device.type != 'cuda':
             raise ValueError('WholeSearchCUDAGraph requires a CUDA model')
@@ -653,10 +711,7 @@ class WholeSearchCUDAGraph:
         target = self.model.encode({'pixels': goal.to(device)})['emb'][:, -1]
         self.static_z.copy_(z)
         self.static_target.copy_(target)
-        generator = torch.Generator(device=device).manual_seed(int(seed))
-        for step in range(M.ROUNDS):
-            torch.randn(1, M.CANDIDATES, M.HORIZON, M.ACTION_DIM, generator=generator, device=device,
-                        out=self.static_noise[step])
+        self.fill_noise(seed, device)
         self.graph.replay()
         return {
             'actions': self.out_mean.cpu().clone(),
