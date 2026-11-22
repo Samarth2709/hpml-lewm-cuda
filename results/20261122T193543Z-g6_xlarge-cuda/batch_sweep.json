@@ -1,0 +1,303 @@
+{
+  "environment": {
+    "utc": "2026-11-22T19:39:42.393882+00:00",
+    "device": "cuda",
+    "torch": "2.8.0+cu128",
+    "platform": "Linux-6.8.0-1069-aws-x86_64-with-glibc2.35",
+    "python": "3.12.16",
+    "git_commit": "5de368bdd0787ebab3da2fbaa551dc0f70b13241",
+    "git_dirty": false,
+    "strict_fp32": {
+      "cuda_matmul_allow_tf32": false,
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false
+    },
+    "cuda": {
+      "version": "12.8",
+      "cudnn": 92302,
+      "name": "NVIDIA L4",
+      "capability": [
+        8,
+        9
+      ],
+      "sm_count": 58,
+      "total_memory_bytes": 23661248512
+    },
+    "gpu_before": {
+      "utc": "2026-11-22T19:39:42.510437+00:00",
+      "csv": [
+        "name, driver_version, temperature.gpu, clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], utilization.gpu [%]",
+        "NVIDIA L4, 595.112.07, 43, 2040 MHz, 6251 MHz, 28.82 W, 72.00 W, 8 %"
+      ]
+    },
+    "gpu_after": {
+      "utc": "2026-11-22T19:55:58.193502+00:00",
+      "csv": [
+        "name, driver_version, temperature.gpu, clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], utilization.gpu [%]",
+        "NVIDIA L4, 595.112.07, 57, 1320 MHz, 6251 MHz, 71.54 W, 72.00 W, 100 %"
+      ]
+    }
+  },
+  "configs": [
+    "optimized_cuda",
+    "optimized_tree_cuda"
+  ],
+  "seed": 47,
+  "repeats": 10,
+  "warmups": 3,
+  "scenes": {
+    "12": {
+      "checks": {
+        "optimized_tree_cuda_vs_tree_independent_max_abs": {
+          "actions": 9.5367431640625e-07,
+          "std": 9.685754776000977e-08,
+          "cost": 5.960464477539063e-08
+        }
+      },
+      "cold_start_ms": {
+        "optimized_cuda": 88730.96099899999,
+        "optimized_tree_cuda": 102833.38940300001
+      },
+      "samples_ms": {
+        "optimized_cuda": [
+          338.711907,
+          339.109416,
+          338.829866,
+          338.989577,
+          339.369525,
+          342.403646,
+          339.11723,
+          339.790115,
+          343.910644,
+          339.817397
+        ],
+        "optimized_tree_cuda": [
+          145.04611,
+          149.082264,
+          148.691355,
+          149.228884,
+          147.352798,
+          149.909394,
+          147.979122,
+          144.681763,
+          149.180978,
+          143.723912
+        ]
+      },
+      "orders": [
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda"
+        ],
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda"
+        ],
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda"
+        ],
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda"
+        ],
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda"
+        ],
+        [
+          "optimized_cuda",
+          "optimized_tree_cuda"
+        ],
+        [
+          "optimized_cuda",
+          "optimized_tree_cuda"
+        ],
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda"
+        ],
+        [
+          "optimized_cuda",
+          "optimized_tree_cuda"
+        ],
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda"
+        ]
+      ],
+      "summary": {
+        "optimized_cuda": {
+          "n": 10,
+          "median_ms": 339.2433775,
+          "median_ci_ms": [
+            338.973548,
+            341.0968805
+          ],
+          "p95_ms": 343.2324949,
+          "iqr_ms": 0.7910397500000386,
+          "mean_ms": 340.0049323,
+          "min_ms": 338.711907,
+          "max_ms": 343.910644
+        },
+        "optimized_tree_cuda": {
+          "n": 10,
+          "median_ms": 148.3352385,
+          "median_ci_ms": [
+            145.04611,
+            149.180978
+          ],
+          "p95_ms": 149.6031645,
+          "iqr_ms": 3.5335175000000163,
+          "mean_ms": 147.48765799999998,
+          "min_ms": 143.723912,
+          "max_ms": 149.909394
+        }
+      },
+      "speedups_vs_baseline": {},
+      "speedups_vs_baseline_compiled": {}
+    }
+  },
+  "batch_sweep": {
+    "optimized_cuda": {
+      "1": {
+        "n": 15,
+        "median_ms": 342.922913,
+        "median_ci_ms": [
+          342.584928,
+          343.044601
+        ],
+        "p95_ms": 343.665755,
+        "iqr_ms": 0.7307580000000371,
+        "mean_ms": 342.81024786666666,
+        "min_ms": 341.332337,
+        "max_ms": 343.750343,
+        "cold_start_ms": 336.76739599997063,
+        "throughput_req_s": 2.916107271023911,
+        "ms_per_request": 342.922913,
+        "req0_max_abs_diff": 0.0
+      },
+      "2": {
+        "n": 15,
+        "median_ms": 606.862612,
+        "median_ci_ms": [
+          604.515012,
+          613.417957
+        ],
+        "p95_ms": 614.2021127,
+        "iqr_ms": 8.002085500000021,
+        "mean_ms": 608.4976032666667,
+        "min_ms": 600.333508,
+        "max_ms": 614.490295,
+        "cold_start_ms": 98351.992355,
+        "throughput_req_s": 3.2956388488141033,
+        "ms_per_request": 303.431306,
+        "req0_max_abs_diff": 0.0
+      },
+      "4": {
+        "n": 15,
+        "median_ms": 1261.832395,
+        "median_ci_ms": [
+          1258.282505,
+          1265.0992830999992
+        ],
+        "p95_ms": 1269.5472072,
+        "iqr_ms": 7.396159500000067,
+        "mean_ms": 1261.5224576666667,
+        "min_ms": 1249.05495,
+        "max_ms": 1269.868552,
+        "cold_start_ms": 93764.24373300005,
+        "throughput_req_s": 3.1699931114860944,
+        "ms_per_request": 315.45809875,
+        "req0_max_abs_diff": 1.2516975402832031e-06
+      },
+      "8": {
+        "n": 15,
+        "median_ms": 2694.324802,
+        "median_ci_ms": [
+          2685.65633,
+          2703.504263
+        ],
+        "p95_ms": 2710.1519125,
+        "iqr_ms": 17.195882500000153,
+        "mean_ms": 2692.5158154,
+        "min_ms": 2658.090243,
+        "max_ms": 2715.683995,
+        "cold_start_ms": 109974.13794300007,
+        "throughput_req_s": 2.9692040076465878,
+        "ms_per_request": 336.79060025,
+        "req0_max_abs_diff": 1.0728836059570312e-06
+      }
+    },
+    "optimized_tree_cuda": {
+      "1": {
+        "n": 15,
+        "median_ms": 145.955882,
+        "median_ci_ms": [
+          145.584276,
+          146.627471
+        ],
+        "p95_ms": 148.9112316,
+        "iqr_ms": 1.515465000000006,
+        "mean_ms": 146.57265066666668,
+        "min_ms": 145.449146,
+        "max_ms": 149.120323,
+        "cold_start_ms": 144.04977399999552,
+        "throughput_req_s": 6.851385406995793,
+        "ms_per_request": 145.955882,
+        "req0_max_abs_diff": 0.0
+      },
+      "2": {
+        "n": 15,
+        "median_ms": 221.081563,
+        "median_ci_ms": [
+          220.343999,
+          221.31904
+        ],
+        "p95_ms": 222.6259563,
+        "iqr_ms": 1.11707100000001,
+        "mean_ms": 220.9755979333333,
+        "min_ms": 219.506479,
+        "max_ms": 222.82083,
+        "cold_start_ms": 111267.259749,
+        "throughput_req_s": 9.046435048046048,
+        "ms_per_request": 110.5407815,
+        "req0_max_abs_diff": 5.960464477539062e-07
+      },
+      "4": {
+        "n": 15,
+        "median_ms": 380.709727,
+        "median_ci_ms": [
+          380.120364,
+          381.756143
+        ],
+        "p95_ms": 382.2765582,
+        "iqr_ms": 1.603181999999947,
+        "mean_ms": 380.78687493333325,
+        "min_ms": 378.14102,
+        "max_ms": 382.570631,
+        "cold_start_ms": 113411.38138699988,
+        "throughput_req_s": 10.506692412405844,
+        "ms_per_request": 95.17743175,
+        "req0_max_abs_diff": 1.1920928955078125e-06
+      },
+      "8": {
+        "n": 15,
+        "median_ms": 724.791515,
+        "median_ci_ms": [
+          723.441561,
+          725.295844
+        ],
+        "p95_ms": 728.1763663999999,
+        "iqr_ms": 2.4104634999999917,
+        "mean_ms": 725.0142334666666,
+        "min_ms": 722.295527,
+        "max_ms": 728.95116,
+        "cold_start_ms": 122414.89046299989,
+        "throughput_req_s": 11.037656808109846,
+        "ms_per_request": 90.598939375,
+        "req0_max_abs_diff": 0.0
+      }
+    }
+  }
+}

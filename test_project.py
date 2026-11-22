@@ -82,6 +82,33 @@ class StatsTest(unittest.TestCase):
         self.assertGreater(speedup['ci'][0], 1.9)
 
 
+class RecordedResultsTest(unittest.TestCase):
+    def test_raw_results_recompute_exactly(self):
+        rows, problems = E.summarize_results()
+        self.assertEqual(problems, [])
+        latency = {}
+        for row in rows:
+            if row['stage'] == 'latency' and row['run_id'] == '20261122T182400Z-g6_xlarge-cuda':
+                latency[row['config']] = row
+        self.assertEqual(len(latency), 8)
+        self.assertAlmostEqual(latency['baseline']['median_ms'], 937.6959465, places=6)
+        self.assertAlmostEqual(latency['baseline_compiled']['median_ms'], 914.023532, places=6)
+        self.assertAlmostEqual(latency['optimized_cuda']['median_ms'], 357.0976635, places=6)
+        self.assertAlmostEqual(latency['optimized_tree_cuda']['median_ms'], 152.2044765, places=6)
+        self.assertAlmostEqual(latency['optimized_cuda']['speedup_vs_compiled'], 2.5596, places=4)
+        self.assertAlmostEqual(latency['optimized_tree_cuda']['speedup_vs_compiled'], 6.0052, places=4)
+        quality = {row['config']: row for row in rows if row['stage'] == 'closed_loop_quality'}
+        self.assertEqual(quality['baseline']['successes'], 198)
+        self.assertEqual(quality['optimized_cuda']['successes'], 198)
+        self.assertEqual(quality['optimized_tree_cuda']['successes'], 196)
+        tree = quality['optimized_tree_cuda']
+        self.assertEqual((tree['gained'], tree['lost']), (28, 30))
+        self.assertAlmostEqual(tree['ci_low'], -0.0590, places=4)
+        self.assertAlmostEqual(tree['ci_high'], 0.0417, places=4)
+        throughput = [row for row in rows if row['stage'] == 'throughput']
+        self.assertEqual(len(throughput), 8)
+
+
 class ModelTest(unittest.TestCase):
     @torch.inference_mode()
     def test_checkpoint_encoder_and_baseline_rollout(self):
@@ -150,8 +177,6 @@ class RolloutTest(unittest.TestCase):
             reference = M.baseline_rollout(model, z, actions)
             optimized = O.rollout(model, z, actions, layout)
             torch.testing.assert_close(optimized, reference, rtol=1e-5, atol=1e-5)
-            plain = O.rollout(model, z, actions, layout, raw_ops=True)
-            torch.testing.assert_close(plain, reference, rtol=1e-5, atol=1e-5)
 
     @torch.inference_mode()
     def test_batched_roots_match_baseline(self):
@@ -162,7 +187,7 @@ class RolloutTest(unittest.TestCase):
             samples = torch.randn(2, 300, 5, 10, generator=gen)
             actions = O.TreePlan(layout, 'cpu', batch_size=2).materialize(samples)
             reference = M.baseline_rollout(model, z, actions)
-            optimized = O.rollout(model, z, actions, layout, raw_ops=True)
+            optimized = O.rollout(model, z, actions, layout)
             torch.testing.assert_close(optimized, reference, rtol=1e-5, atol=1e-5)
 
     @torch.inference_mode()
@@ -235,37 +260,6 @@ class CudaTest(unittest.TestCase):
                 one = single.request(*pairs[index], 47 + index)
                 for key in one:
                     torch.testing.assert_close(batched[key][index:index + 1], one[key], rtol=1e-4, atol=1e-4)
-
-    @torch.inference_mode()
-    def test_triton_short_attention_matches_explicit(self):
-        gen = torch.Generator(device='cuda').manual_seed(7)
-        shapes = [(1, 1, False), (1, 2, False), (1, 3, False), (2, 2, True), (3, 3, True),
-                  (2, 2, False), (3, 3, False)]
-        for batch in (30, 60, 300):
-            for q_len, k_len, causal in shapes:
-                # Strided views, exactly as produced by the packed to_qkv projection.
-                qkv = torch.randn(batch, k_len, 3 * 16 * 64, device='cuda', generator=gen)
-                q_full, k_full, v_full = qkv.chunk(3, dim=-1)
-                q = q_full[:, :q_len].reshape(batch, q_len, 16, 64).transpose(1, 2)
-                k = k_full.reshape(batch, k_len, 16, 64).transpose(1, 2)
-                v = v_full.reshape(batch, k_len, 16, 64).transpose(1, 2)
-                mask = O.attention_mask(q_len, k_len, q.device, causal)
-                reference = O.explicit_attention(q, k, v, mask)
-                out = O.cuda_attend(q, k, v, causal)
-                torch.testing.assert_close(out, reference, rtol=1e-6, atol=1e-6)
-                self.assertTrue(out.transpose(1, 2).is_contiguous())
-
-    @torch.inference_mode()
-    def test_triton_rollout_matches_baseline(self):
-        model = cuda_model()
-        gen = torch.Generator(device='cuda').manual_seed(11)
-        z = torch.randn(1, 1, 192, device='cuda', generator=gen)
-        for layout in ('independent', 'late'):
-            samples = torch.randn(1, 300, 5, 10, device='cuda', generator=gen)
-            actions = O.TreePlan(layout, 'cuda').materialize(samples)
-            reference = M.baseline_rollout(model, z, actions)
-            out = O.rollout(model, z, actions, layout, raw_ops=True, use_cuda_attn=True)
-            torch.testing.assert_close(out, reference, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == '__main__':

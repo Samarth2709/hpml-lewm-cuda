@@ -2,7 +2,7 @@
 
 No upstream source file is stored in this repository. Each file is downloaded once
 into .cache/, checked against a pinned SHA-256 and then loaded unchanged.
-Licenses and notices: THIRD_PARTY_LICENSES.
+Licenses and notices: THIRD_PARTY_NOTICES.txt.
 """
 import ast
 import collections

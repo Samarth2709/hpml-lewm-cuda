@@ -1,0 +1,735 @@
+{
+  "environment": {
+    "utc": "2026-11-22T18:28:01.750290+00:00",
+    "device": "cuda",
+    "torch": "2.8.0+cu128",
+    "platform": "Linux-6.8.0-1069-aws-x86_64-with-glibc2.35",
+    "python": "3.12.16",
+    "git_commit": "0f3a821a70ea90d226be2ac385a520154863557d",
+    "git_dirty": false,
+    "strict_fp32": {
+      "cuda_matmul_allow_tf32": false,
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false
+    },
+    "cuda": {
+      "version": "12.8",
+      "cudnn": 92302,
+      "name": "NVIDIA L4",
+      "capability": [
+        8,
+        9
+      ],
+      "sm_count": 58,
+      "total_memory_bytes": 23661248512
+    },
+    "gpu_before": {
+      "utc": "2026-11-22T18:28:01.880573+00:00",
+      "csv": [
+        "name, driver_version, temperature.gpu, clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], utilization.gpu [%]",
+        "NVIDIA L4, 595.112.07, 49, 2040 MHz, 6251 MHz, 30.69 W, 72.00 W, 0 %"
+      ]
+    },
+    "gpu_after": {
+      "utc": "2026-11-22T18:37:01.379060+00:00",
+      "csv": [
+        "name, driver_version, temperature.gpu, clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], utilization.gpu [%]",
+        "NVIDIA L4, 595.112.07, 71, 2025 MHz, 6251 MHz, 64.94 W, 72.00 W, 4 %"
+      ]
+    }
+  },
+  "configs": [
+    "baseline",
+    "baseline_compiled",
+    "optimized",
+    "optimized_tree",
+    "optimized_cuda",
+    "optimized_cuda_triton",
+    "optimized_tree_cuda",
+    "optimized_tree_cuda_triton"
+  ],
+  "seed": 47,
+  "repeats": 20,
+  "warmups": 3,
+  "scenes": {
+    "12": {
+      "checks": {
+        "baseline_compiled_vs_baseline_max_abs": {
+          "actions": 0.0,
+          "std": 0.0,
+          "cost": 7.152557373046875e-07
+        },
+        "optimized_vs_baseline_max_abs": {
+          "actions": 0.0,
+          "std": 0.0,
+          "cost": 3.5762786865234375e-07
+        },
+        "optimized_cuda_vs_baseline_max_abs": {
+          "actions": 1.9073486328125e-06,
+          "std": 2.980232238769531e-07,
+          "cost": 7.152557373046875e-07
+        },
+        "optimized_cuda_triton_vs_baseline_max_abs": {
+          "actions": 1.430511474609375e-06,
+          "std": 3.427267074584961e-07,
+          "cost": 1.1324882507324219e-06
+        },
+        "tree_shared_equals_independent": false,
+        "optimized_tree_cuda_vs_tree_independent_max_abs": {
+          "actions": 9.5367431640625e-07,
+          "std": 9.685754776000977e-08,
+          "cost": 0.0
+        },
+        "optimized_tree_cuda_triton_vs_tree_independent_max_abs": {
+          "actions": 9.5367431640625e-07,
+          "std": 1.1175870895385742e-07,
+          "cost": 2.384185791015625e-07
+        }
+      },
+      "cold_start_ms": {
+        "baseline": 1284.1761470000108,
+        "baseline_compiled": 68385.35844700002,
+        "optimized": 10780.322418000025,
+        "optimized_tree": 14708.544692000032,
+        "optimized_cuda": 83356.17124999998,
+        "optimized_cuda_triton": 64588.791915,
+        "optimized_tree_cuda": 105333.87478399999,
+        "optimized_tree_cuda_triton": 80517.46133799998
+      },
+      "samples_ms": {
+        "baseline": [
+          934.797576,
+          940.37984,
+          914.162888,
+          917.737072,
+          914.780938,
+          922.226388,
+          949.13411,
+          945.553386,
+          947.148827,
+          930.701052,
+          924.217785,
+          936.002194,
+          940.679773,
+          934.966723,
+          939.369325,
+          936.022568,
+          945.6103,
+          946.147331,
+          945.253352,
+          940.198695
+        ],
+        "baseline_compiled": [
+          895.071239,
+          911.708766,
+          898.395605,
+          906.20638,
+          910.025107,
+          914.025932,
+          914.021132,
+          916.977352,
+          923.239825,
+          900.784875,
+          919.872767,
+          920.60476,
+          922.451059,
+          920.517418,
+          926.565079,
+          923.024984,
+          919.108862,
+          906.282218,
+          911.788254,
+          909.883024
+        ],
+        "optimized": [
+          818.389054,
+          826.842577,
+          826.443379,
+          823.777923,
+          824.416537,
+          823.025946,
+          823.604229,
+          821.225725,
+          824.177247,
+          823.84806,
+          822.90377,
+          821.525703,
+          817.721784,
+          824.463665,
+          826.634141,
+          825.908746,
+          825.444236,
+          825.857704,
+          825.744174,
+          827.620564
+        ],
+        "optimized_tree": [
+          1073.701454,
+          1079.153885,
+          1081.647317,
+          1074.051997,
+          1082.599032,
+          1074.048833,
+          1077.935656,
+          1079.011024,
+          1076.786797,
+          1073.636941,
+          1074.566561,
+          1072.939569,
+          1066.598956,
+          1078.637079,
+          1073.867933,
+          1079.30607,
+          1079.284099,
+          1076.970085,
+          1079.615931,
+          1081.751787
+        ],
+        "optimized_cuda": [
+          358.785085,
+          345.597154,
+          357.170478,
+          362.113381,
+          360.676212,
+          356.192715,
+          345.776063,
+          357.479472,
+          364.947429,
+          365.784296,
+          360.448025,
+          349.260886,
+          364.965808,
+          346.857516,
+          362.065615,
+          353.804211,
+          346.180711,
+          357.024849,
+          355.073636,
+          345.662477
+        ],
+        "optimized_cuda_triton": [
+          361.001043,
+          350.686982,
+          350.786753,
+          349.66704,
+          359.444966,
+          350.714369,
+          353.444558,
+          372.211752,
+          356.866059,
+          361.841154,
+          370.148988,
+          360.36981,
+          346.989538,
+          361.048984,
+          354.387113,
+          352.099625,
+          365.911796,
+          365.277593,
+          353.343819,
+          364.845033
+        ],
+        "optimized_tree_cuda": [
+          151.884499,
+          143.609997,
+          143.905793,
+          152.179667,
+          154.65231,
+          154.055673,
+          154.884952,
+          151.725687,
+          144.695366,
+          150.406886,
+          151.916318,
+          160.998461,
+          156.19511,
+          152.229286,
+          149.461812,
+          154.524108,
+          161.307111,
+          155.319205,
+          152.358351,
+          142.929561
+        ],
+        "optimized_tree_cuda_triton": [
+          142.920512,
+          147.55932,
+          153.917554,
+          153.747831,
+          154.218357,
+          148.902593,
+          144.091535,
+          144.356902,
+          144.153245,
+          154.304428,
+          154.703736,
+          156.496486,
+          154.852601,
+          157.094138,
+          154.987158,
+          155.831766,
+          154.996548,
+          144.360374,
+          143.745449,
+          149.96362
+        ]
+      },
+      "orders": [
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda_triton",
+          "baseline",
+          "optimized_cuda",
+          "optimized",
+          "baseline_compiled",
+          "optimized_tree",
+          "optimized_tree_cuda_triton"
+        ],
+        [
+          "optimized_tree_cuda_triton",
+          "optimized_cuda_triton",
+          "baseline_compiled",
+          "optimized",
+          "optimized_tree_cuda",
+          "optimized_cuda",
+          "baseline",
+          "optimized_tree"
+        ],
+        [
+          "baseline",
+          "optimized_cuda",
+          "optimized_tree",
+          "optimized_tree_cuda",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda_triton",
+          "optimized",
+          "baseline_compiled"
+        ],
+        [
+          "optimized_tree_cuda",
+          "optimized",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda_triton",
+          "optimized_tree",
+          "baseline",
+          "baseline_compiled",
+          "optimized_cuda"
+        ],
+        [
+          "optimized_tree_cuda",
+          "optimized_cuda_triton",
+          "optimized_cuda",
+          "optimized_tree",
+          "baseline",
+          "optimized_tree_cuda_triton",
+          "baseline_compiled",
+          "optimized"
+        ],
+        [
+          "optimized_cuda_triton",
+          "baseline_compiled",
+          "optimized_tree",
+          "optimized",
+          "baseline",
+          "optimized_cuda",
+          "optimized_tree_cuda",
+          "optimized_tree_cuda_triton"
+        ],
+        [
+          "optimized",
+          "optimized_cuda",
+          "optimized_tree_cuda",
+          "baseline_compiled",
+          "optimized_tree",
+          "optimized_tree_cuda_triton",
+          "optimized_cuda_triton",
+          "baseline"
+        ],
+        [
+          "optimized",
+          "optimized_tree_cuda_triton",
+          "baseline_compiled",
+          "optimized_tree_cuda",
+          "baseline",
+          "optimized_cuda",
+          "optimized_cuda_triton",
+          "optimized_tree"
+        ],
+        [
+          "optimized_tree_cuda_triton",
+          "optimized",
+          "optimized_tree_cuda",
+          "optimized_cuda_triton",
+          "baseline_compiled",
+          "optimized_cuda",
+          "baseline",
+          "optimized_tree"
+        ],
+        [
+          "optimized",
+          "baseline",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda_triton",
+          "optimized_tree_cuda",
+          "optimized_tree",
+          "baseline_compiled",
+          "optimized_cuda"
+        ],
+        [
+          "optimized",
+          "optimized_tree",
+          "baseline",
+          "optimized_tree_cuda_triton",
+          "optimized_tree_cuda",
+          "optimized_cuda",
+          "optimized_cuda_triton",
+          "baseline_compiled"
+        ],
+        [
+          "baseline_compiled",
+          "optimized_tree",
+          "optimized_cuda",
+          "optimized_tree_cuda_triton",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda",
+          "optimized",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "optimized_tree",
+          "optimized",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda_triton",
+          "optimized_cuda",
+          "baseline_compiled",
+          "optimized_tree_cuda"
+        ],
+        [
+          "baseline_compiled",
+          "optimized_tree_cuda",
+          "optimized_tree",
+          "optimized_cuda",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda_triton",
+          "optimized",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "optimized_tree",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda_triton",
+          "optimized_tree_cuda",
+          "optimized_cuda",
+          "baseline_compiled",
+          "optimized"
+        ],
+        [
+          "optimized",
+          "baseline",
+          "optimized_tree",
+          "optimized_cuda_triton",
+          "optimized_cuda",
+          "baseline_compiled",
+          "optimized_tree_cuda",
+          "optimized_tree_cuda_triton"
+        ],
+        [
+          "baseline_compiled",
+          "optimized_tree_cuda_triton",
+          "baseline",
+          "optimized",
+          "optimized_cuda",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda",
+          "optimized_tree"
+        ],
+        [
+          "optimized_tree_cuda_triton",
+          "baseline",
+          "optimized_cuda_triton",
+          "optimized_tree_cuda",
+          "optimized_cuda",
+          "optimized",
+          "baseline_compiled",
+          "optimized_tree"
+        ],
+        [
+          "optimized_tree_cuda_triton",
+          "baseline_compiled",
+          "optimized_tree_cuda",
+          "baseline",
+          "optimized_cuda",
+          "optimized_tree",
+          "optimized",
+          "optimized_cuda_triton"
+        ],
+        [
+          "optimized_cuda_triton",
+          "optimized",
+          "optimized_cuda",
+          "optimized_tree",
+          "optimized_tree_cuda",
+          "baseline",
+          "optimized_tree_cuda_triton",
+          "baseline_compiled"
+        ]
+      ],
+      "summary": {
+        "baseline": {
+          "n": 20,
+          "median_ms": 937.6959465,
+          "median_ci_ms": [
+            932.749314,
+            942.9665625
+          ],
+          "p95_ms": 947.2480911499999,
+          "iqr_ms": 16.24812524999993,
+          "mean_ms": 935.2545061499999,
+          "min_ms": 914.162888,
+          "max_ms": 949.13411
+        },
+        "baseline_compiled": {
+          "n": 20,
+          "median_ms": 914.0235319999999,
+          "median_ci_ms": [
+            909.9540655000001,
+            920.1950925
+          ],
+          "p95_ms": 923.4060877,
+          "iqr_ms": 11.556431000000089,
+          "mean_ms": 913.5277318999999,
+          "min_ms": 895.071239,
+          "max_ms": 926.565079
+        },
+        "optimized": {
+          "n": 20,
+          "median_ms": 824.296892,
+          "median_ci_ms": [
+            823.3150875,
+            825.800939
+          ],
+          "p95_ms": 826.88147635,
+          "iqr_ms": 2.8750625000000127,
+          "mean_ms": 823.9787581999999,
+          "min_ms": 817.721784,
+          "max_ms": 827.620564
+        },
+        "optimized_tree": {
+          "n": 20,
+          "median_ms": 1077.4528705,
+          "median_ci_ms": [
+            1074.0504150000002,
+            1079.218992
+          ],
+          "p95_ms": 1081.79414925,
+          "iqr_ms": 5.285983750000014,
+          "mean_ms": 1076.8055503,
+          "min_ms": 1066.598956,
+          "max_ms": 1082.599032
+        },
+        "optimized_cuda": {
+          "n": 20,
+          "median_ms": 357.0976635,
+          "median_ci_ms": [
+            351.5325485,
+            360.5621185
+          ],
+          "p95_ms": 365.0067324,
+          "iqr_ms": 12.363519249999968,
+          "mean_ms": 355.79330095,
+          "min_ms": 345.597154,
+          "max_ms": 365.784296
+        },
+        "optimized_cuda_triton": {
+          "n": 20,
+          "median_ms": 358.1555125,
+          "median_ci_ms": [
+            352.721722,
+            361.445069
+          ],
+          "p95_ms": 370.25212619999996,
+          "iqr_ms": 10.820716750000031,
+          "mean_ms": 358.05434875,
+          "min_ms": 346.989538,
+          "max_ms": 372.211752
+        },
+        "optimized_tree_cuda": {
+          "n": 20,
+          "median_ms": 152.2044765,
+          "median_ci_ms": [
+            151.0662865,
+            154.588209
+          ],
+          "p95_ms": 161.0138935,
+          "iqr_ms": 4.539852999999994,
+          "mean_ms": 151.96200764999998,
+          "min_ms": 142.929561,
+          "max_ms": 161.307111
+        },
+        "optimized_tree_cuda_triton": {
+          "n": 20,
+          "median_ms": 153.8326925,
+          "median_ci_ms": [
+            145.95984700000002,
+            154.7781685
+          ],
+          "p95_ms": 156.5263686,
+          "iqr_ms": 10.526734249999976,
+          "mean_ms": 150.76020765,
+          "min_ms": 142.920512,
+          "max_ms": 157.094138
+        }
+      },
+      "speedups_vs_baseline": {
+        "baseline": {
+          "ratio": 1.0,
+          "ci": [
+            1.0,
+            1.0
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "baseline_compiled": {
+          "ratio": 1.0258991302425242,
+          "ci": [
+            1.0169715770050622,
+            1.0326615765916891
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized": {
+          "ratio": 1.1375706442673328,
+          "ci": [
+            1.1314053905252996,
+            1.1439651775046713
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_tree": {
+          "ratio": 0.870289524649793,
+          "ci": [
+            0.8661176382911844,
+            0.8751789889763303
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_cuda": {
+          "ratio": 2.6258809349504464,
+          "ci": [
+            2.5936652181877404,
+            2.673391166792625
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_cuda_triton": {
+          "ratio": 2.618125126581711,
+          "ci": [
+            2.588546159013709,
+            2.662222239127381
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_tree_cuda": {
+          "ratio": 6.160764571861985,
+          "ci": [
+            6.060643132121401,
+            6.223380724885031
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_tree_cuda_triton": {
+          "ratio": 6.095557005868567,
+          "ci": [
+            6.044471891046894,
+            6.4427296912691325
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        }
+      },
+      "speedups_vs_baseline_compiled": {
+        "baseline": {
+          "ratio": 0.9747547010431701,
+          "ci": [
+            0.9683714613460405,
+            0.9833116506018361
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "baseline_compiled": {
+          "ratio": 1.0,
+          "ci": [
+            1.0,
+            1.0
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized": {
+          "ratio": 1.1088523332682905,
+          "ci": [
+            1.103122309370649,
+            1.1166513951357737
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_tree": {
+          "ratio": 0.8483188054210116,
+          "ci": [
+            0.8440983541063212,
+            0.8556853040767568
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_cuda": {
+          "ratio": 2.5595897857225824,
+          "ci": [
+            2.531671698177726,
+            2.604377460351213
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_cuda_triton": {
+          "ratio": 2.5520297750547676,
+          "ci": [
+            2.520506790839804,
+            2.598049372956074
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_tree_cuda": {
+          "ratio": 6.005234228442683,
+          "ci": [
+            5.915086932584007,
+            6.060248538643995
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        },
+        "optimized_tree_cuda_triton": {
+          "ratio": 5.941672846947016,
+          "ci": [
+            5.909902726074591,
+            6.253692498515691
+          ],
+          "confidence": 0.95,
+          "resamples": 10000
+        }
+      }
+    }
+  }
+}

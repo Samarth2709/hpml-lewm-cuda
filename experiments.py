@@ -2,6 +2,7 @@
 
   python experiments.py benchmark --output results/<run>/benchmark.json
   python experiments.py evaluate --set eval96 --output results/<run>/eval96.json
+  python experiments.py summarize   # recompute every recorded result from the raw JSON
 
 A request = CPU current/goal images -> encode both -> 30 CEM rounds x 300 candidates x 5 steps
 -> CPU plan. Cold start (first call) is recorded separately from warm repetitions, and the
@@ -11,7 +12,9 @@ import os
 os.environ.setdefault('TORCHINDUCTOR_USE_FAST_MATH', '0')  # strict FP32: no fast-math
 
 import argparse
+import csv
 import datetime
+import io
 import json
 import math
 import platform
@@ -30,6 +33,7 @@ import optimizations as O
 import upstream
 
 ROOT = Path(__file__).resolve().parent
+RESULTS = ROOT / 'results'
 
 
 # ---------------------------------------------------------------------------
@@ -180,27 +184,21 @@ def quality_gate(records, reference_policy, variant_policy, margin=0.075,
 # Planner configurations
 # ---------------------------------------------------------------------------
 
-#   baseline           - released rollout and native CEM, eager PyTorch
-#   baseline_compiled  - unchanged baseline + torch.compile + one CUDA graph per CEM round (CUDA)
-#   optimized          - optimized rollout (optimizations.rollout), same search, eager PyTorch
-#   optimized_tree     - optimized rollout on shared-prefix tree proposals ('late'), eager PyTorch
+#   baseline                     - released rollout and native CEM, eager PyTorch
+#   baseline_compiled            - unchanged baseline + torch.compile + one CUDA graph per CEM round (CUDA)
 #   optimized_cuda               - same search, compiled rounds, 30-round CUDA graph (CUDA)
 #   optimized_tree_noshared_cuda - optimized_tree_cuda without the shared sliding window (ablation)
 #   optimized_tree_cuda          - tree search, compiled rounds, 30-round CUDA graph (CUDA)
-#   *_triton                     - the same CUDA graph planner with the Triton short-attention kernel
-CONFIGS = ['baseline', 'baseline_compiled', 'optimized', 'optimized_tree',
-           'optimized_cuda', 'optimized_cuda_triton', 'optimized_tree_noshared_cuda',
-           'optimized_tree_cuda', 'optimized_tree_cuda_triton']
-CPU_CONFIGS = ['baseline', 'optimized', 'optimized_tree']
+CONFIGS = ['baseline', 'baseline_compiled', 'optimized_cuda', 'optimized_tree_noshared_cuda',
+           'optimized_tree_cuda']
+CPU_CONFIGS = ['baseline']
 # Same-search configurations must reproduce the baseline plan up to FP32 rounding.
-SAME_SEARCH = ['baseline_compiled', 'optimized', 'optimized_cuda', 'optimized_cuda_triton']
+SAME_SEARCH = ['baseline_compiled', 'optimized_cuda']
 # Tree configurations change the proposals; they are compared with the same tree search
 # evaluated leaf by leaf (the 'independent' rollout on tree-shaped candidates).
-TREE_SEARCH = ['optimized_tree', 'optimized_tree_noshared_cuda', 'optimized_tree_cuda',
-               'optimized_tree_cuda_triton']
+TREE_SEARCH = ['optimized_tree_noshared_cuda', 'optimized_tree_cuda']
 # Whole-search CUDA graph planners can serve R requests together (multi-request batching).
-GRAPH_CONFIGS = ['optimized_cuda', 'optimized_cuda_triton', 'optimized_tree_noshared_cuda',
-                 'optimized_tree_cuda', 'optimized_tree_cuda_triton']
+GRAPH_CONFIGS = ['optimized_cuda', 'optimized_tree_noshared_cuda', 'optimized_tree_cuda']
 
 PLANNERS = {}
 
@@ -219,22 +217,14 @@ def cuda_planner(model, name, batch_size=1):
         planner = O.CompiledGraphBaseline(model)
     elif name == 'optimized_cuda':
         planner = O.WholeSearchCUDAGraph(model, 'independent', batch_size=batch_size)
-    elif name == 'optimized_cuda_triton':
-        planner = O.WholeSearchCUDAGraph(model, 'independent', use_cuda_attn=True, batch_size=batch_size)
     elif name == 'optimized_tree_noshared_cuda':
         planner = O.WholeSearchCUDAGraph(model, 'late', batch_size=batch_size, use_shared_window=False)
     elif name == 'optimized_tree_cuda':
         planner = O.WholeSearchCUDAGraph(model, 'late', batch_size=batch_size)
-    elif name == 'optimized_tree_cuda_triton':
-        planner = O.WholeSearchCUDAGraph(model, 'late', use_cuda_attn=True, batch_size=batch_size)
     else:
         raise ValueError(f'Unknown configuration {name!r}')
     PLANNERS[key] = planner
     return planner
-
-
-def tree_rollout(model, z, actions):
-    return O.rollout(model, z, actions, layout='late')
 
 
 def run(model, pair, seed, name):
@@ -242,11 +232,6 @@ def run(model, pair, seed, name):
     pixels, goal = pair
     if name == 'baseline':
         return M.request(model, pixels, goal, seed)
-    if name == 'optimized':
-        return M.request(model, pixels, goal, seed, rollout=O.rollout)
-    if name == 'optimized_tree':
-        plan = O.tree_plan('late', str(next(model.parameters()).device))
-        return M.request(model, pixels, goal, seed, rollout=tree_rollout, plan=plan)
     planner = cuda_planner(model, name)
     return planner.request(pixels, goal, seed)
 
@@ -256,13 +241,6 @@ def max_difference(first, second):
     for key in first:
         result[key] = float((first[key] - second[key]).abs().max())
     return result
-
-
-def plans_equal(first, second):
-    for key in first:
-        if not torch.equal(first[key], second[key]):
-            return False
-    return True
 
 
 def output_checks(model, pair, seed, outputs):
@@ -278,11 +256,7 @@ def output_checks(model, pair, seed, outputs):
         plan = O.tree_plan('late', str(next(model.parameters()).device))
         reference = M.request(model, pixels, goal, seed, rollout=O.rollout, plan=plan)
         for name in tree_names:
-            if name == 'optimized_tree':
-                checks['tree_shared_equals_independent'] = plans_equal(reference, outputs[name])
-                checks['tree_shared_vs_independent_max_abs'] = max_difference(reference, outputs[name])
-            else:
-                checks[f'{name}_vs_tree_independent_max_abs'] = max_difference(reference, outputs[name])
+            checks[f'{name}_vs_tree_independent_max_abs'] = max_difference(reference, outputs[name])
     return checks
 
 
@@ -660,6 +634,145 @@ def evaluate(args):
 
 
 # ---------------------------------------------------------------------------
+# Recompute recorded results from the raw JSON files
+# ---------------------------------------------------------------------------
+
+CSV_FIELDS = [
+    'run_id', 'artifact', 'stage', 'config', 'batch', 'n', 'median_ms', 'median_ci_low_ms',
+    'median_ci_high_ms', 'p95_ms', 'speedup_vs_compiled', 'speedup_ci_low', 'speedup_ci_high',
+    'throughput_req_s', 'ms_per_request', 'successes', 'paired_cases', 'gained', 'lost',
+    'difference', 'ci_low', 'ci_high', 'mcnemar_p', 'gate_passed', 'git_commit',
+]
+
+
+def check_same(problems, label, recomputed, stored):
+    if recomputed != stored:
+        problems.append(f'{label}: recomputed {recomputed!r}, stored {stored!r}')
+
+
+def latency_rows(run_id, artifact, report, problems):
+    """Recompute timing summaries and speedups from the raw samples of each scene."""
+    rows = []
+    commit = report['environment'].get('git_commit')
+    for scene, result in report['scenes'].items():
+        samples = result['samples_ms']
+        for name, values in samples.items():
+            summary = summarize_timings(values)
+            check_same(problems, f'{artifact} {name} summary', summary, result['summary'][name])
+            row = {
+                'run_id': run_id,
+                'artifact': artifact,
+                'stage': 'latency',
+                'config': name,
+                'batch': 1,
+                'n': summary['n'],
+                'median_ms': summary['median_ms'],
+                'median_ci_low_ms': summary['median_ci_ms'][0],
+                'median_ci_high_ms': summary['median_ci_ms'][1],
+                'p95_ms': summary['p95_ms'],
+                'git_commit': commit,
+            }
+            if 'baseline_compiled' in samples:
+                speedup = bootstrap_speedup_ci(samples['baseline_compiled'], values)
+                stored = result['speedups_vs_baseline_compiled'][name]
+                check_same(problems, f'{artifact} {name} speedup', speedup, stored)
+                row['speedup_vs_compiled'] = speedup['ratio']
+                row['speedup_ci_low'] = speedup['ci'][0]
+                row['speedup_ci_high'] = speedup['ci'][1]
+            rows.append(row)
+    return rows
+
+
+def throughput_rows(run_id, artifact, report, problems):
+    """Recompute throughput and amortized cost from the stored batch medians (raw samples were not kept)."""
+    rows = []
+    commit = report['environment'].get('git_commit')
+    for name, by_size in report.get('batch_sweep', {}).items():
+        for size, stats in by_size.items():
+            batch = int(size)
+            throughput = batch / (stats['median_ms'] / 1e3)
+            per_request = stats['median_ms'] / batch
+            label = f'{artifact} {name} R={batch}'
+            check_same(problems, f'{label} throughput', throughput, stats['throughput_req_s'])
+            check_same(problems, f'{label} ms/request', per_request, stats['ms_per_request'])
+            rows.append({
+                'run_id': run_id,
+                'artifact': artifact,
+                'stage': 'throughput',
+                'config': name,
+                'batch': batch,
+                'n': stats['n'],
+                'median_ms': stats['median_ms'],
+                'median_ci_low_ms': stats['median_ci_ms'][0],
+                'median_ci_high_ms': stats['median_ci_ms'][1],
+                'p95_ms': stats['p95_ms'],
+                'throughput_req_s': throughput,
+                'ms_per_request': per_request,
+                'git_commit': commit,
+            })
+    return rows
+
+
+def quality_rows(run_id, artifact, report, problems):
+    """Recompute every policy's paired quality gate from the episode records."""
+    rows = []
+    reference = report['reference_policy']
+    for policy, stored in report['gates'].items():
+        gate = quality_gate(report['records'], reference, policy, margin=report['margin'])
+        check_same(problems, f'{artifact} {policy} gate', gate, stored)
+        rows.append({
+            'run_id': run_id,
+            'artifact': artifact,
+            'stage': 'closed_loop_quality',
+            'config': policy,
+            'batch': 1,
+            'successes': gate['variant_successes'],
+            'paired_cases': gate['paired_cases'],
+            'gained': gate['gained'],
+            'lost': gate['lost'],
+            'difference': gate['difference'],
+            'ci_low': gate['ci_95'][0],
+            'ci_high': gate['ci_95'][1],
+            'mcnemar_p': gate['mcnemar_p'],
+            'gate_passed': gate['passed'],
+        })
+    return rows
+
+
+def summarize_results(results_dir=RESULTS):
+    """CSV rows recomputed from every raw result file, plus a list of values that disagree."""
+    rows = []
+    problems = []
+    for path in sorted(results_dir.glob('*/*.json')):
+        report = json.loads(path.read_text())
+        run_id = path.parent.name
+        artifact = str(path.relative_to(results_dir.parent))
+        if 'records' in report:
+            rows += quality_rows(run_id, artifact, report, problems)
+        else:
+            rows += latency_rows(run_id, artifact, report, problems)
+            rows += throughput_rows(run_id, artifact, report, problems)
+    return rows, problems
+
+
+def summarize(args):
+    rows, problems = summarize_results(args.results)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=CSV_FIELDS, lineterminator='\n')
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    if args.output:
+        args.output.write_text(buffer.getvalue())
+    else:
+        print(buffer.getvalue(), end='')
+    if problems:
+        for problem in problems:
+            print('MISMATCH', problem)
+        raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------
 
@@ -694,7 +807,14 @@ def main():
     quality.add_argument('--bootstrap-resamples', type=int, default=10000)
     quality.add_argument('--output', type=Path, required=True)
 
+    recompute = commands.add_parser('summarize', help='Recompute recorded results from raw JSON as CSV.')
+    recompute.add_argument('--results', type=Path, default=RESULTS)
+    recompute.add_argument('--output', type=Path, help='Write the CSV here instead of standard output.')
+
     args = parser.parse_args()
+    if args.command == 'summarize':
+        summarize(args)
+        return
     if args.device.startswith('cuda'):
         torch.set_num_threads(4)
     else:
